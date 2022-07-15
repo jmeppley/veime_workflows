@@ -1,0 +1,144 @@
+"""
+Double polishing with short reads and racon.
+
+Finish up with cd-hit to dereplicate the polished sequences.
+
+Modified from Elaine's bash script.
+"""
+
+
+raw_fasta = config.get('raw_fasta', 'chosen_polished_repeat_fragments.fasta')
+short_reads = config.get('short_reads', 
+                         ('/mnt/delong/scratch2/elaine/nanopore/nanopore/'
+                          '2020-08/HOT319-25m-tailed-phage/reads/'
+                          'HSD00-20a-319-25m-LV-Tailed-Phage.clean.uniqname.fastq'))
+name = config.get('name', 'PIPRs')
+
+rule target_outputs:
+    """ list as inputs the files we want to make
+    
+      * gene length for each step
+      * derepicated polished sequences
+    
+    """
+    input:
+        f"{name}.gene.mean_length",
+        f"racon/{name}.polished.gene.mean_length",
+        f"racon/{name}.2x.polished.gene.mean_length",
+        f"{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
+        
+        
+if raw_fasta != f"{name}.fasta":
+    # we only need this rule if the input file has a differnt name
+    rule local_fasta:
+        """ Link external file to standard local name """
+        input: raw_fasta
+        output: f"{name}.fasta"
+        shell: "ln -s {input} {output}"
+            
+###### gene calling
+
+rule prodigal:
+    input: "{name}.fasta"
+    output: 
+        faa="{name}.prot.faa",
+        ffn="{name}.gene.ffn"
+    log: "{name}.prodigal.out"
+    benchmark: "{name}.prodigal.time"
+    threads: 20
+    shell: """
+        batch_launcher.py -N {threads} -K -v -X local -i -i -o -a -o -d \
+            -- prodigal -p meta -i {input} \
+                -a {output.faa} -d {output.ffn} \
+            > {log} 2>&1
+        """
+
+rule get_gene_locations:
+    input: "{name}.gene.ffn"
+    output: "{name}.gene.start.end.length"
+    shell:
+        """
+        grep "partial=00" {input} \
+            | awk -F " # " '{{print $2, $3, $3-$2}}' \
+            > {output}
+        """
+
+rule calc_mean_gene_length:
+    """ calculates the mean gene length form the start/end/length file
+        saves the results to a file and echoes the result to the terminal"""
+    input: rules.get_gene_locations.output
+    output: "{name}.gene.mean_length"
+    shell: """
+    awk '{{ sum += $3 }} END {{ if (NR > 0) print sum / NR }}' {input} > {output}
+    echo -n "Mean gene length of {wildcards.name} is: "
+    cat {output}
+    """
+        
+
+
+###### racon
+
+rule bwa_index:
+    input: "{name}.fasta"
+    output: "mapping/{name}.bwadb.bwt"
+    log: "mapping/{name}.bwadb.log"
+    benchmark: "mapping/{name}.bwadb.time"
+    params:
+        db="mapping/{name}.bwadb"
+    shell: "bwa index -p {params.db} {input} > {log} 2>&1"
+
+rule bwa_mem:
+    input:
+        reads=short_reads,
+        db="mapping/{name}.bwadb.bwt"
+    output: "mapping/{name}.v.all_QC.uniq.sam"
+    log: "mapping/{name}.v.all_QC.uniq.log"
+    benchmark: "mapping/{name}.v.all_QC.uniq.time"
+    params:
+        db="mapping/{name}.bwadb"
+    threads: 60
+    shell: "bwa mem -t {threads} {params.db} {input.reads} \
+                > {output} \
+                2> {log}"
+
+rule racon:
+    input:
+        reads=short_reads,
+        sam=rules.bwa_mem.output,
+        fasta="{name}.fasta"
+    output: "racon/{name}.polished.fasta"
+    log: "racon/{name}.polished.log"
+    benchmark: "racon/{name}.polished.time"
+    threads: 60
+    shell: "racon -t {threads} -u \
+              {input.reads} {input.sam} {input.fasta} \
+             > {output} 2> {log}"
+
+rule double_racon:
+    """ this is a trick to get racon to run twice 
+        link {name}.2x to racon/{name}.polished.fasta
+        
+        So, for example, if name==AFVGs,
+        we can run through the rules twice:
+        
+         * once with name == AFVGs
+         * again with name == AFVGs.2x
+    """
+    input: "racon/{name}.polished.fasta"
+    output: "{name}.2x.fasta"
+    shell: "ln -s {input} {output}"
+
+        
+##### cdhit
+
+rule cd_hit_est:
+    input: "racon/{name}.2x.polished.fasta"
+    output: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
+    log: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta.log"
+    benchmark: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta.time"
+    threads: 60
+    shell:
+        "cd-hit-est -T {threads} -M 0 \
+            -c 0.95 -aS 0.5 -G 0 -g 0 \
+            -i {input} -o {output} \
+         > {log} 2>&1"

@@ -1,0 +1,53 @@
+"""
+Given a fasta file of concatemer fragments:
+
+ * run lastal to find between fragment similarity
+ * run mcl to cluster fragments
+
+TODO:
+
+ * add code to tuurn MCL output into directres of clustered fragments
+
+"""
+
+fragment_fasta = config.get('fragment_fasta', 'vesicke_cmer_fragments.fasta')
+output_dir = config.get('output_dir', 'fragments')
+
+rule all:
+    input: output_dir
+        
+rule lastdb:
+    " format fragments for self-search with lastal "
+    input: fragment_fasta
+    output: fragment_fasta + '.prj'
+    threads: config.get('lastdb_threads', 20)
+    shell: 'lastdb -P {threads} {input} {input}'
+        
+rule lastal:
+    " compare all framents to all fragments with lastal "
+    input: 
+        fasta=fragment_fasta,
+        db=fragment_fasta + '.prj'
+    output: fragment_fasta + ".ava.lastn"
+    threads: config.get('lastal_threads', 40)
+    shell: 'lastal -P {threads} -f blasttab+ \
+            {input.fasta} {input.fasta} \
+            > {output} 2> {output}.log'
+    
+rule abc_file:
+    " convert lastal output to pairwise scores "
+    input:  fragment_fasta + ".ava.lastn"
+    output: fragment_fasta + ".ava.abc"
+    run:
+        from jme.jupy_tools import hit_tables
+        agg_hits = hit_tables.agg_hit_table(str(input), format=hit_tables.BLAST_PLUS)        
+        agg_hits \
+            .query("(pctid >= 85) and (200 * mlen) / (qlen + hlen) >= 40") \
+            [['query', 'hit', 'mfrac']] \
+            .to_csv(str(output), sep='\t', header=None, index=None)
+        
+rule mcl:
+    " run MCL to cluster on pairwise scores "
+    input:  fragment_fasta + ".ava.abc"
+    output: fragment_fasta + ".ava.mcl"
+    shell: 'mcl {input} --abc -I 5 -o {output} > {output}.log 2>&1'        

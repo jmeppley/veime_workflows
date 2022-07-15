@@ -1,0 +1,97 @@
+"""
+Given a collection of folders with consistent names, each conatining at least one FAA file of genes named by HMM:
+
+ * align all genes to HMMs
+ * concatentate multiple alignments if multiple HMMs ina  subfolder
+ * trim alignments of sparse data
+ * infer tree with IQtree
+"""
+
+import re
+from jme.jupy_tools.experimental import cluster_trees
+from Bio import Align, Seq, SeqRecord, AlignIO
+from collections import defaultdict
+
+genes_template = '{tree_dir}/{vog}.faa'
+align_template = "{tree_dir}/{vog}.aln"
+
+bootstraps = config.get('bootstraps', 0)
+specific_tree_dir = config.get('specific_tree_dir', None)
+tree_dir_rexp = config.get('tree_dir_rexp', '^tree_cl[^/]+$')
+vog_faa_rexp = config.get('vog_faa_rexp', '^VOG\d+$')
+vog_hmm_dir = config.get('vog_hmm_dir',
+                         '/mnt/delong/scratch2/jmeppley/nanopore_biller/checkv_afvgs/gene_concat/VOG')
+
+hmm_template = f'{vog_hmm_dir}/{{vog}}.hmm'
+
+
+# find VOG faa files in each tree dir
+tree_vogs = {}
+if specific_tree_dir:
+    vogs, = glob_wildcards(specific_tree_dir + "/{vog}.faa")
+    tree_vogs[specific_tree_dir] = vogs
+else:
+    for tree_dir, vog in zip(*glob_wildcards(genes_template)):
+        if re.search(tree_dir_rexp, tree_dir) and re.search(vog_faa_rexp, vog):
+            tree_vogs.setdefault(tree_dir, []).append(vog)
+
+rule all:
+    input: expand("{tree_dir}/cat.LGG.b{bootstraps}.iqtree", \
+                  bootstraps=[bootstraps,], \
+                  tree_dir=tree_vogs.keys())
+
+rule filt_alns_only:
+    input: expand("{tree_dir}/align.filter.fasta", \
+                  tree_dir=tree_vogs.keys())
+        
+rule vog_alns_only:
+    input: [align_template.format(vog=vog, tree_dir=tree_dir) \
+            for tree_dir, vogs in tree_vogs.items() \
+            for vog in vogs]
+
+rule align_tree_dir_vog:
+    input:
+        faa=genes_template,
+        hmm=hmm_template
+    output: align_template
+    shell:
+        "hmmalign -o {output} --amino --informat FASTA --trim  {input.hmm} {input.faa} \
+            > {output}.log 2>&1"
+
+rule cat_tree_dir_alignment:
+    input: lambda w: expand(align_template, tree_dir=w.tree_dir, vog=tree_vogs[w.tree_dir])
+    output: "{tree_dir}/align.fasta"
+    run:
+        tree_dir = wildcards.tree_dir
+        align_files_by_vog = {
+            vog: align_template.format(tree_dir=tree_dir,
+                                       vog=vog)
+            for vog in tree_vogs[tree_dir] 
+        }
+        final_alignment = cluster_trees.cat_tree_dir_alignment(align_files_by_vog)
+
+        with open(str(output), "wt") as align_out:
+            align_out.write(final_alignment.format('fasta'))
+
+rule filter_tree_dir_alignment:
+    input: rules.cat_tree_dir_alignment.output
+    output: "{tree_dir}/align.filter.fasta"
+    run:
+        full_alignment = AlignIO.read(str(input), format='fasta')
+        filt_alignment = cluster_trees.filter_cat_alignment(full_alignment)
+        with open(str(output), "wt") as align_out:
+            align_out.write(filt_alignment.format('fasta'))
+        
+rule iqtree:
+    input: rules.filter_tree_dir_alignment.output
+    output: 
+        report="{tree_dir}/cat.LGG.b{bootstraps}.iqtree",
+    threads: lambda w: 10 if int(w.bootstraps) == 0 else 60
+    params:
+        bootstraps=lambda w: "" if int(w.bootstraps) == 0 else f"-b {str(w.bootstraps)}"
+    shell:
+        "iqtree -s {input} -m LG+G \
+            {params.bootstraps} \
+            --prefix {wildcards.tree_dir}/cat.LGG.b{wildcards.bootstraps} \
+            --threads {threads} \
+         > /dev/null 2> {output.report}.err"

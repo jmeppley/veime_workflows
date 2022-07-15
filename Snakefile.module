@@ -1,0 +1,535 @@
+"""
+Given a fasta file of genomes.
+
+And using:
+
+ * collection of VOG HMMs
+ * eggnog mapper
+ 
+Annotate and cluster genomes
+
+TODO:
+
+ * replace old MCL clusering with module finding
+
+"""
+######
+# CONFIG
+
+# nameing prefix for output files
+name = config.get('name', 'genomes')
+
+## minimum starting files
+
+# HMM data for gene identification
+hmm_db = config.get('hmm_db', 
+                    '/mnt/delong/scratch2/jmeppley/nanopore_biller/checkv_afvgs/gene_concat/VOG/VOGS.hmm')
+vog_metadata_table = config.get('vog_tsv', '/mnt/delong/seqdbs/VOG/2021.07/VOGS.tsv')
+
+# dict from a source label to a fasta of genomes
+genomes_source_file = config.get('genomes_source_file', f'{name}.fasta.sources.tsv')
+
+## alternate starting point (for genomes)
+# collected genomes in one fasta file
+genomes_fasta = config.get('genomes_fasta', f'{name}.fasta')
+# dict from seq ID to source
+genome_source_file = config.get('genome_source_file', f'{name}.sequence.sources.tsv')
+
+#defaults
+config.setdefault('hmmer_threads', 4)
+
+wildcard_constraints:
+    cutoff=r'(0|0?\.\d+)',
+    mcl_i=r'(\d+|\.\d+|\d+\.\d*)',
+
+mcl_template = "{name}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl"
+cutoffs = [0,.25,.5]
+mcl_is = [2,5]
+mcl_outputs = expand("{name}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl",
+                     cutoff=cutoffs, 
+                     mcl_i=mcl_is,
+                     name=[name,]
+                    )
+
+rule output:
+    """ This workflow creates 6 MCL output files """
+    input: 
+        mcl_outputs,
+        f"{name}.metadata.tsv"
+        
+rule collect_genomes:
+    input: genomes_source_file
+    output:
+        fasta=genomes_fasta,
+        source_map=genome_source_file
+    run:
+        import pandas
+        from Bio import SeqIO
+        
+        # read fasta file names from source table and collect into one fasta
+        count = 0
+        source_dict = {}
+        with open(str(output.fasta), 'wt') as fasta_out:
+            for source, fasta_file in pandas.read_csv(str(input), sep='\t', 
+                                                      usecols=[0,1], 
+                                                      header=None).values:
+                count += 1
+                if count == 1 and not os.path.exists(fasta_file):
+                    # the first line might just be a header
+                    continue
+                
+                for seq in SeqIO.parse(fasta_file, 'fasta'):
+                    if seq.id in source_dict:
+                        raise Exception(f"Multiple sequences share n ID. Please rename!\nEG {seq.id}")
+                    source_dict[seq.id] = source
+                    fasta_out.write(seq.format('fasta'))
+        
+        # save map from sequence ID to source
+        pandas.Series(source_dict, name='Source').to_csv(str(output.source_map), sep='\t')
+            
+rule prodigal:
+    input: genomes_fasta
+    output: 
+        faa="{name}.prodigal.faa",
+        gff="{name}.prodigal.gff",
+    log: "{name}.prodigal.log"
+    params:
+        meta="-p meta" if config.get('prodigal_meta', True) else ""
+    threads: config.get('prodigal_threads', 100)  # default is high because this is a bottleneck
+    shell: """
+        batch_launcher.py -N {threads} -K -v -X local -i -i -o -a -o -o \
+            --  prodigal -i {input} -a {output.faa} -f gff -o {output.gff} \
+                {params.meta} \
+            > {log} 2>&1
+        """
+    
+rule hmmer_batch:
+    input:
+        faa="{name}.prodigal.faa",
+        hmm=hmm_db,
+    output: "{name}.vs.HMMs.tbl"
+    log: "{name}.vs.HMMs.tbl.log"
+    threads: config.get('hmmer_batch_threads', 20)
+    shell: """
+        let N={threads}/{config[hmmer_threads]}
+        echo running $N fragments of {config[hmmer_threads]} each
+        batch_launcher.py -N $N -K -v -X local \
+            --  hmmsearch --cpu {config[hmmer_threads]} --domtblout {output} -o /dev/null {input.hmm} {input.faa} \
+            > {log} 2>&1
+        """
+
+rule hmmer_filter:
+    """ condense tbl file into best hits """
+    input: "{name}.vs.HMMs.tbl"
+    output: "{name}.vs.HMMs.E.001.sort.F0.tbl"
+    threads: 3
+    shell: """
+        filter_blast_m8.py {input} -f hmmsearchdom -E .001 \
+             2> {output}.filter_1.log \
+             | sort \
+             | filter_blast_m8.py -f hmmsearchdom -s evalue -F 0  \
+             > {output} \
+             2> {output}.filter_2.log """
+        
+EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
+TMP_DIR="/nvram/jmeppley"
+SCRATCH_DIR="/data/jmeppley/tmp"
+rule eggnog_annots:
+    """ runs eggnog mapper on the gene predictions """
+    input:
+        faa="{name}.prodigal.faa"
+    output:
+        annot="{name}.prodigal.emapper.annotations"
+    log: "{name}.prodigal.emapper.log"
+    params:
+        out_pref="{name}.prodigal"
+    threads: config.get('emapper_threads', 40)
+    shell:
+        "emapper.py \
+            -i {input.faa} \
+            --output {params.out_pref} \
+            --temp_dir {TMP_DIR} \
+            --scratch_dir {SCRATCH_DIR} \
+            --cpu {threads} -m diamond \
+            --data_dir {EGGNOG_DATA_DIR} \
+            > {log} 2>&1"
+
+hlen_rexp = re.compile('\d+\s+VOG\d+\s+-\s+(\d+)')
+def get_hlen(hit):
+    return int(hlen_rexp.search(hit.line).group(1))
+
+rule gene_annots:
+    """ condense tbl file and eggnog annots into  gene_table """
+    input: 
+        faa="{name}.prodigal.faa",
+        tbl= "{name}.vs.HMMs.E.001.sort.F0.tbl",
+        eggnog="{name}.prodigal.emapper.annotations",
+        vog_md=vog_metadata_table
+    output: "{name}.genes.tsv"
+    run:
+        import pandas
+        # parse the eggnog mapper annotations file into a dict from gene to OG
+        from jme.jupy_tools.utils import parse_eggnog_annotations
+        # we only need the tax_og column
+        eggnog_annots = parse_eggnog_annotations(str(input.eggnog))
+        eggnog_og_dict = eggnog_annots['tax_og'].to_dict()
+
+        # parse the gene names, starts, and ends from the faa file and add eggnog annotations
+        from jme.jupy_tools.experimental.gene_synteny import import_genes
+        gene_table = import_genes(str(input.faa),
+                                  eggnog_og_dict)
+        gene_table['eggnog'] = gene_table['annot']
+        gene_table['eggnog_root'] = [eggnog_annots.root_og.get(g, None)
+                                     for g in gene_table.index]
+
+        # add hmm results to gene table, overwriting eggnog annot with VOG hit
+        from edl.blastm8 import generate_hits, HMMSEARCHDOM
+        
+        # first pass: colect the new data:
+        annot_details = {}
+        for gene, hits in generate_hits(str(input.tbl),
+                                        format=HMMSEARCHDOM, 
+                                        evalue=.001):
+            for hit in hits:
+                vog = hit.hit
+                vog_len = get_hlen(hit)
+                h_frac = (abs(hit.hend - hit.hstart) + 1) / vog_len
+                annot_details[gene] = \
+                    (vog, vog, hit.hstart, hit.hend, vog_len, h_frac, hit.evalue)
+                # just take the first hit
+                break
+
+        # update data frame all at once
+        gene_table[['annot','vog','hmm_start', 'hmm_end', 'hmm_len', 'hmm_frac', 'evalue']] = \
+            [annot_details.get(gene, (annot, None, None, None, None, None, None))
+             for gene, annot in gene_table.annot.items()
+            ]
+        
+        # alternate annot (using root OG instead of tax-specific OG)
+        gene_table['annot_r'] = [v if pandas.notna(v) else r 
+                                 for v,r in gene_table[['vog',
+                                                        'eggnog_root']].values]
+        
+        # pull description column from VOG metadata or EGGNOG annots
+        vog_annots = pandas.read_csv(str(input.vog_md), sep='\t', index_col=0)
+        def get_gene_desc(gene, vog, og, annot):
+            if pandas.isna(annot) or len(annot.strip()) == 0:
+                return None
+            if annot == vog:
+                # drop the first word of the VOG description
+                vog_desc = vog_annots.ConsensusFunctionalDescription[vog]
+                return " ".join(vog_desc.split()[1:])
+            elif annot == og:
+                return eggnog_annots.Description[gene]
+    
+        gene_table['desc'] = [get_gene_desc(gene, vog, og, annot)
+                              for gene, vog, og, annot 
+                              in gene_table.reset_index()[['gene', 'vog', 'eggnog', 'annot']].values]
+                
+        # write out gene_table
+        gene_table.to_csv(str(output), sep='\t')
+
+## MCL clustering on shared gene ratio
+rule calc_all_scores:
+    """ build a score matrix based on shared gene pairs """
+    input: "{name}.genes.tsv"
+    output: "{name}.shared.gene.scores.c0.abc"
+    run:
+        # score each genome pair on how much of the annotated length is in shared gene families
+        scores = {}
+
+        # load gene data
+        import pandas
+        gene_table = pandas.read_csv(str(input), sep='\t', index_col=0)
+        
+        # collapse table into genome indexed with two columns: 
+        #   1. dict of annot to total gene length for annot
+        #   2. total gene length
+        data = gene_table[['end','start','genome','annot']] \
+            .eval('gene_len = end + 1 - start') \
+            .groupby(['genome', 'annot']) \
+            .agg({'gene_len':sum}) \
+            .reset_index() \
+            .set_index('annot') \
+            [['genome','gene_len']] \
+            .groupby('genome') \
+            .agg({'gene_len':(dict, sum)}) \
+            .reset_index() \
+            .values
+
+        # loop over pairs of genomes (and their annotation data)
+        from itertools import combinations
+        for genome_data_1, genome_data_2 in combinations(data, 2):
+            (genome1, genes_lens_1, tot_len_1) = genome_data_1
+            (genome2, genes_lens_2, tot_len_2) = genome_data_2
+            
+            # what genes are in both
+            shared_genes = set(genes_lens_1).intersection(genes_lens_2)
+            # what is the total length of these shared genes?
+            tot_shared_gene_len = sum((genes_lens_1[g] + genes_lens_2[g] 
+                                       for g in shared_genes if g != "Unknown"))
+            # compare to total of all genes for score
+            tot_gene_len = tot_len_1 + tot_len_2
+            score = tot_shared_gene_len / tot_gene_len
+            scores[(genome1, genome2)] = score
+            scores[(genome2, genome1)] = score
+
+        with open(str(output), 'wt') as abc_out:
+            for (genome1, genome2), score in scores.items():
+                abc_out.write(f"{genome1}\t{genome2}\t{score}\n")
+    
+rule filt_scores:
+    input: "{name}.shared.gene.scores.c0.abc"
+    output: "{name}.shared.gene.scores.c{cutoff}.abc"
+    run:
+        cutoff = float(wildcards.cutoff)
+        with open(str(output), 'wt') as scores_out:
+            with open(str(input)) as scores_in:
+                for line in scores_in:
+                    g1, g2, score = line.rstrip().split('\t')
+                    score = float(score)
+                    if score >= cutoff:
+                        scores_out.write(line)
+
+ruleorder: calc_all_scores > filt_scores
+        
+rule mcl:
+    input: "{root}.abc"
+    output: "{root}.I{mcl_i}.mcl"
+    threads: 10
+    shell: "mcl {input} --abc -te {threads} -I {wildcards.mcl_i} -o {output} > {output}.log 2>&1"
+
+## Bipartite modules
+rule bipartite_modules:
+    input: "{name}.genes.tsv"
+    output: "{name}.bipartite.modules.json"
+    run:
+        import json
+        import pandas
+        import igraph
+        import leidenalg
+        output_data = {}
+
+        # load gene data, but only keep annotated genes
+        annot_col = "annot_r"
+        gene_table = pandas.read_csv(str(input), sep='\t', index_col=0)
+        gene_table = gene_table[gene_table[annot_col].notna()]
+
+        # get the annotations
+        n_uniq_annots = None
+
+        last_annot_count = 0
+        last_genome_count = 0
+        annots = set(gene_table[annot_col].values)
+        genomes = set(gene_table.genome.values)
+
+        # iteratively filter genomes and genes until we stabilize
+        while (
+            len(annots) != last_annot_count 
+            and len(genomes) != last_genome_count
+        ):
+            last_annot_count = len(annots)
+            last_genome_count = len(genomes)
+
+            # require annots to be in at least 2 genomes
+            # require genomes to have at least 2 annots found in other genomes
+            annot_counts = \
+                gene_table[[g in genomes for g in gene_table.genome]] \
+                    .groupby(['genome', annot_col]) \
+                    .agg({'gene_no': len}) \
+                    .reset_index() \
+                    .groupby(annot_col) \
+                    .agg({'genome':len}) \
+                    .sort_values('genome', ascending=False)
+
+            if n_uniq_annots is None:
+                n_uniq_annots = annot_counts.shape[0]
+
+            # require annots to be in at least 2 genomes
+            annots = set(annot_counts.query('genome > 1').index)
+
+            # require genomes to have at least 2 annots found in other genomes
+            genomes = set(g for g, df 
+                          in gene_table[[(a in annots) 
+                                         for a 
+                                         in gene_table[annot_col].values]] \
+                                  .groupby('genome')
+                          if df.shape[0] > 1)
+
+        # only keep genomes with 2 annots found elsewhere
+        named_edges = set(tuple(v) 
+                          for v in gene_table[['genome',annot_col]].values
+                          if v[1] in annots and v[0] in genomes)
+
+        output_data['named_edges'] = tuple(named_edges)
+
+        # count some things
+        graphed_seqs = set(n[0] for n in named_edges)
+        graphed_annots = set(n[1] for n in named_edges)
+        n_seqs, n_annots = len(graphed_seqs), len(graphed_annots)
+
+        n_genomes = len(set(gene_table.genome))
+        n_annotated = len(set(gene_table.genome))
+
+        output_data['counts'] = dict(
+            annot_col=annot_col,
+            starting_genomes=n_genomes,
+            annotated_genomes=n_annotated,
+            used_genomes=n_seqs,
+            starting_annotations=n_uniq_annots,
+            used_annotations=n_annots,
+        )
+        
+        print(f'''
+    column: {annot_col}
+        # genomes: {n_genomes}
+         # annotated: {n_annotated}
+         # in edges: {n_seqs}
+        # annots {n_uniq_annots}
+         # in edges {n_annots}
+
+       Did we lose any genomes with non-null annotations?
+         == {n_genomes - n_annotated} lost PRs because they don't have any annotated genes
+         == {n_annotated - n_seqs} lost PRs because none of their annoated genes appear in any other genomes
+        ''')
+
+        ## Build graph and calcuate modules
+        # save lookup dict for sving module info 
+        node_ids = {i:n for i,n in enumerate(chain(graphed_seqs, graphed_annots))}
+        node_id_dict = {n:i for i,n in node_ids.items()}
+
+        #### build graph
+        numbered_edges = [tuple(node_id_dict[n] for n in e) for e in named_edges]
+        graph = igraph.Graph(edges=numbered_edges)
+
+        #### Label layers
+        for btype, nameset in ((0, graphed_annots), (1, graphed_seqs)):
+            for name in nameset:
+                node_id = node_id_dict[name]
+                graph.vs[node_id]['type'] = btype
+
+        if not graph.is_bipartite():
+            raise Exception("Graph is not bipartite somehow!!")
+
+
+        #### Get largest connected subgraphs
+        ccss = graph.components(mode='strong')
+        output_data['counts']['n_connected_components'] = len(ccss)
+        if not graph.is_connected():
+            print('subgraph sizes: ', [len(sg.vs) for sg in ccss.subgraphs()])
+
+            core_graph = ccss.subgraphs()[0]
+        else:
+            print('already connected!')
+            core_graph = graph
+
+        #### Find modules
+        optimiser = leidenalg.Optimiser()
+        memberships_by_resolution = {}
+        for r in [2, 1.5, 1, .75, .5, .25]:
+            p_01, p_0, p_1 = leidenalg.CPMVertexPartition.Bipartite(core_graph, 
+                                                                    resolution_parameter_01=r / len(numbered_edges), 
+                                                                    degree_as_node_size=True)
+
+            diff = optimiser.optimise_partition_multiplex([p_01, p_0, p_1], layer_weights=[1, -1, -1], n_iterations=-1)
+            memberships_by_resolution[r] = list(p_01.membership)
+            print(r, len(set(memberships_by_resolution[r])))
+
+
+        #Connect names to module indexing
+
+        # the subgraph is reindexed from the larger graph
+        # build map from subgraph index (j) to full graph index (i)
+        core_node_to_node = {j:i for j, i in enumerate(i for i,g in enumerate(ccss.membership) if g == 0)}
+
+        # revese the dict we made to turn nodes into numbers
+        node_name_dict = {i:n for n,i in node_id_dict.items()}
+
+        # combine the dict to map subgaph numbers back to graph numbers and then to names
+        core_node_to_name = {j:node_name_dict[i] for j, i in core_node_to_node.items()}
+
+        # Make a map from node to subgraph for the n small subgraphs. 
+        # Let's call these clusters 1,2,... and then add n to all the module indexes. These n were set aside before the module fining code was run, 
+        # so they are the same for all param values (but may differ by annot col).
+        n = len(ccss.subgraphs()) - 1
+
+        # in the ccss membership, 0 is the big subgraph we found modules in and 1,2,.. are the other much smaller subgraphs
+        name_to_subgraph = {node_name_dict[i]:sgi for i, sgi in enumerate(ccss.membership)}
+
+        # Make a map from node name to module ID for each parameter value.
+        output_data['membership_by_resolution'] = {
+            res:{core_node_to_name[i]:(mi + n + 1) for i, mi in enumerate(membs)}
+            for res, membs in memberships_by_resolution.items()
+        }
+
+        # update dicts with unconnected subgraphs as modules 1,2...
+        for node_name, subgraph in name_to_subgraph.items():
+            if subgraph > 0:
+                for res in memberships_by_resolution.keys():
+                    output_data['membership_by_resolution'][res][node_name] = \
+                        subgraph
+
+        with open(str(output), 'wt') as json_data_out:
+            json.dump(output_data, json_data_out)
+        
+rule summarize_genomes:
+    """ make a table of genome meatadata for quick access """
+    input: 
+        genes="{name}.genes.tsv",
+        fasta=genomes_fasta,
+        clusters=mcl_outputs,
+        modules=rules.bipartite_modules.output,
+        sources=genome_source_file,
+    output:
+        "{name}.metadata.tsv"
+    run:
+        import pandas, numpy
+        from Bio import SeqIO
+        
+        # load data
+        gene_table = pandas.read_csv(str(input.genes), sep='\t', index_col=0)
+        seq_sources = pandas.read_csv(str(input.sources), sep='\t', index_col=0)
+        ref_lens = {g.id:len(g) for g in SeqIO.parse(str(input.fasta), 'fasta')}
+        clusters_by_params = {}
+        for mcl_file in input.clusters:
+            mcl_params = "_".join(mcl_file.split(".")[-3:-1])
+            clusters = clusters_by_params.setdefault(mcl_params, [])
+            with open(mcl_file) as lines:
+                for line in lines:
+                    clusters.append([s.strip() for s in line.split('\t')])
+
+        # collapse gene table by genome (adding length and source)
+        genome_df = \
+            gene_table \
+                .groupby('genome') \
+                .agg({'gene_no':len}) \
+                .rename({'gene_no': 'Gene_count'}, axis=1)
+        
+        genome_df = genome_df \
+                .join(pandas.Series(ref_lens, name='Length')) 
+        
+        genome_df = genome_df \
+                .join(seq_sources)
+
+        # add clsuter info
+        for params, clusters in clusters_by_params.items():
+            param_label = f"mcl_{params}"
+            genome_to_cluster_id = {g:i 
+                                    for i, cluster in enumerate(clusters) 
+                                    for g in cluster}
+            genome_df[param_label] = numpy.array(
+                [genome_to_cluster_id.get(g, -1) for g in genome_df.index],
+                dtype=int,
+            )
+            
+        # add module info
+        with open(str(input.modules)) as json_in:
+            module_data = json.load(json_in)['membership_by_resolution']
+        for resolution, module_assignments in module_data.items():
+            col_key = f'module_{resolution}'
+            genome_df[col_key] = numpy.array(
+                [module_assignments.get(g, -1) for g in genome_df.index],
+            )
+            
+        # save table
+        genome_df.to_csv(str(output), sep='\t')
