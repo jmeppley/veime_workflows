@@ -12,6 +12,9 @@ Do:
  * TODO: turn MCL output into directres of clustered fragments
 
 """
+
+
+
 working_dir = config.get('working_dir', 'test/run')
 reads_fasta = config.get('reads_fasta', 'test/data/cmer_reads.fasta')
 cmer_data = config.get('cmer_data', 'test/data/cmer_reads.tsv')
@@ -24,7 +27,7 @@ rule all:
 
 ############
 # functions
-
+import numpy
 def get_cmer_fragments(read, cmer_data, column=repeat_size_column):
     """ given a eqRecord and a cmer data table, iterate over fragment SeqRecords """
     try:
@@ -57,6 +60,7 @@ rule generate_fragments:
     run:
         # load cmer stats (specifically the repeat sizes)
         from jme.jupy_tools.utils import read_tsv
+        from Bio import SeqIO
         cmer_df = read_tsv(str(input.data))
 
         # do the work
@@ -97,14 +101,15 @@ rule abc_file:
         
 rule mcl:
     " run MCL to cluster on pairwise scores "
-    input:  fragment_fasta + ".ava.abc"
-    output: fragment_fasta + ".ava.mcl"
+    input:  fragments_fasta + ".ava.abc"
+    output: fragments_fasta + ".ava.mcl"
     shell: 'mcl {input} --abc -I 5 -o {output} > {output}.log 2>&1'        
         
 rule cluster:
     " use MCL results to merge reads "
     input:
-        mcl: fragment_fasta + ".ava.mcl",
+        frags=fragments_fasta,
+        mcl=fragments_fasta + ".ava.mcl",
     output: directory(output_dir)
     run:
         
@@ -113,7 +118,7 @@ rule cluster:
             clusters = [line.strip().split() for line in mcl_in]
 
         # get maps from frags to reads and reads to clusters
-        from collections import defaultdict
+        from collections import defaultdict, Counter
         frags_by_read = defaultdict(list)
         clusters_by_frag = {}
         for i, cluster in enumerate(clusters):
@@ -148,6 +153,7 @@ rule cluster:
         count = 0
         too_few_frags = []
         from itertools import chain
+        from Bio import SeqIO
         for cluster in read_clusters:
             count += 1
             frags = set(chain(*[frags_by_read[r] for r in cluster]))
@@ -158,9 +164,9 @@ rule cluster:
             
             cluster_dir = f"{output_dir}/cluster_{count:04d}"
             if not os.path.exists(cluster_dir):
-                os.path.mkdirs(cluster_dir)
+                os.makedirs(cluster_dir, exist_ok=True)
             with open(os.path.join(cluster_dir, 'all.fasta'), 'wt') as fasta_out:
-                for frag in SeqIO.parse(str(input.frags)):
+                for frag in SeqIO.parse(str(input.frags), 'fasta'):
                     if frag.id in frags:
                         fasta_out.write(frag.format('fasta'))
 
