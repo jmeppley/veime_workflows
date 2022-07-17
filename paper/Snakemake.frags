@@ -1,0 +1,167 @@
+"""
+Given:
+
+ * a fasta file of rads
+ * a table with repeat sizes
+ 
+Do:
+
+ * TODOD: fragment reads into monomers
+ * run lastal to find between fragment similarity
+ * run mcl to cluster fragments
+ * TODO: turn MCL output into directres of clustered fragments
+
+"""
+working_dir = config.get('working_dir', 'test/run')
+reads_fasta = config.get('reads_fasta', 'test/data/cmer_reads.fasta')
+cmer_data = config.get('cmer_data', 'test/data/cmer_reads.tsv')
+repeat_size_column = config.get('repeat_size_column', 'repeat_size')
+fragments_fasta = f'{working_dir}/fragments.fasta'
+output_dir = config.get('output_dir', f'{working_dir}/fragments')
+
+rule all:
+    input: output_dir
+
+############
+# functions
+
+def get_cmer_fragments(read, cmer_data, column=repeat_size_column):
+    """ given a eqRecord and a cmer data table, iterate over fragment SeqRecords """
+    try:
+        row = cmer_data.loc[read.id,:]
+    except KeyError:
+        return
+    
+    repeat_size = int(numpy.round(row[column]))
+    
+    s = 0
+    f = 1
+    e = repeat_size
+    orig_id = read.id
+    while e < len(read):
+        frag = read[s:e]
+        frag.id = f"{orig_id}:{f:03d}"
+        yield frag
+        f, s, e = f + 1, e, e + repeat_size
+        
+####################3
+# Rules
+        
+rule generate_fragments:
+    """ split up reads into monomers """
+    input:
+        reads=reads_fasta,
+        data=cmer_data,
+    output:
+        frags=fragments_fasta
+    run:
+        # load cmer stats (specifically the repeat sizes)
+        from jme.jupy_tools.utils import read_tsv
+        cmer_df = read_tsv(str(input.data))
+
+        # do the work
+        with open(str(output.frags), 'wt') as fasta_out:
+            for read in SeqIO.parse(str(input.reads), 'fasta'):
+                for fragment in get_cmer_fragments(read, cmer_df):
+                    fasta_out.write(fragment.format('fasta'))
+    
+rule lastdb:
+    " format fragments for self-search with lastal "
+    input: fragments_fasta
+    output: fragments_fasta + '.prj'
+    threads: config.get('lastdb_threads', 20)
+    shell: 'lastdb -P {threads} {input} {input}'
+        
+rule lastal:
+    " compare all framents to all fragments with lastal "
+    input: 
+        fasta=fragments_fasta,
+        db=fragments_fasta + '.prj'
+    output: fragments_fasta + ".ava.lastn"
+    threads: config.get('lastal_threads', 40)
+    shell: 'lastal -P {threads} -f blasttab+ \
+            {input.fasta} {input.fasta} \
+            > {output} 2> {output}.log'
+    
+rule abc_file:
+    " convert lastal output to pairwise scores "
+    input:  fragments_fasta + ".ava.lastn"
+    output: fragments_fasta + ".ava.abc"
+    run:
+        from jme.jupy_tools import hit_tables
+        agg_hits = hit_tables.agg_hit_table(str(input), format=hit_tables.BLAST_PLUS)        
+        agg_hits \
+            .query("(pctid >= 85) and (200 * mlen) / (qlen + hlen) >= 40") \
+            [['query', 'hit', 'mfrac']] \
+            .to_csv(str(output), sep='\t', header=None, index=None)
+        
+rule mcl:
+    " run MCL to cluster on pairwise scores "
+    input:  fragment_fasta + ".ava.abc"
+    output: fragment_fasta + ".ava.mcl"
+    shell: 'mcl {input} --abc -I 5 -o {output} > {output}.log 2>&1'        
+        
+rule cluster:
+    " use MCL results to merge reads "
+    input:
+        mcl: fragment_fasta + ".ava.mcl",
+    output: directory(output_dir)
+    run:
+        
+        # parse MCL output
+        with open(str(input.mcl)) as mcl_in:
+            clusters = [line.strip().split() for line in mcl_in]
+
+        # get maps from frags to reads and reads to clusters
+        from collections import defaultdict
+        frags_by_read = defaultdict(list)
+        clusters_by_frag = {}
+        for i, cluster in enumerate(clusters):
+            for frag in cluster:
+                read = re.sub(r':\d+$', '', frag)
+                clusters_by_frag[frag] = i
+                frags_by_read[read].append(frag)
+        
+        # start with naive single read clusters (all fragments for each read)
+        #  and merge when the best cluster for each is reciprocal
+        read_clusters = []
+        frag_cluster_to_read_cluster = {}
+        for read, frags in frags_by_read.items():
+            cluster_counts = Counter(clusters_by_frag[f] for f in frags)
+            if ((len(cluster_counts) > 1) and
+                ((max(cluster_counts.values()) == 1) or
+                 (cluster_counts.most_common()[1][1] > 1))):
+                # no clear winner, read is it's own cluster
+                read_clusters.append([read,])
+            else:
+                best_cluster = cluster_counts.most_common()[0][0]
+                try:
+                    read_cluster = frag_cluster_to_read_cluster[best_cluster]
+                    read_clusters[read_cluster].append(read)
+                except KeyError:
+                    read_cluster = len(read_clusters)
+                    read_clusters.append([read,])
+                    frag_cluster_to_read_cluster[best_cluster] = read_cluster
+
+        # Only polish clusters with at least 3 fragments, 
+        # for others, just pass the first fragment through as the final sequence
+        count = 0
+        too_few_frags = []
+        from itertools import chain
+        for cluster in read_clusters:
+            count += 1
+            frags = set(chain(*[frags_by_read[r] for r in cluster]))
+            
+            if len(frags) < 3:
+                # just take the frst frag if fewer than 3
+                frags = [next(iter(sorted(frags)))]
+            
+            cluster_dir = f"{output_dir}/cluster_{count:04d}"
+            if not os.path.exists(cluster_dir):
+                os.path.mkdirs(cluster_dir)
+            with open(os.path.join(cluster_dir, 'all.fasta'), 'wt') as fasta_out:
+                for frag in SeqIO.parse(str(input.frags)):
+                    if frag.id in frags:
+                        fasta_out.write(frag.format('fasta'))
+
+                        

@@ -20,15 +20,16 @@ import pandas, numpy
 
 #####
 # Configuration
+working_dir = config.get('working_dir', 'test/run')
 
 # empty list for no input ({fragments_dir} must exist if no {fragment_fasta} given)
 fragment_fasta = config.get('fragment_fasta',
                             [])
 # where to write ot fragments or where to find already clustered fragnents 
-fragments_dir = config.get('fragments_dir', 
-                           'fragments')
+fragments_dir = config.get('fragments_dir', f'{working_dir}/fragments')
+
 # final output fasta
-output_file = config.get('output_fasta', 'polished_fragments.fasta')
+output_file = config.get('output_fasta', f'{working_dir}/polished_fragments.fasta')
 
 # translating fragments to reads (if reading fragents from file)
 # default fragmment namee is {readname}:{fragment_num}
