@@ -1,5 +1,5 @@
 """
-Given a fasta file of genomes.
+Given a set of fasta files and a table labelling them (see test/data/genome.sources.tsv)
 
 And using:
 
@@ -8,32 +8,39 @@ And using:
  
 Annotate and cluster genomes
 
-TODO:
+Outputs:
 
- * replace old MCL clusering with module finding
-
+ * {working_dir}/{name}.metadata.tsv:           genomes with cluster and module asignments
+ * {working_dir}/{name}.genes.tsv:              genome annotations
+ * {working_dir}/{name}.bipartite.modules.json: module assignments for genes and genomes
+ 
 """
 ######
 # CONFIG
+working_dir = config.get('working_dir', 'test/run')
 
-# nameing prefix for output files
+# naming prefix for output files
 name = config.get('name', 'genomes')
+prefix = f"{working_dir}/{name}"
 
 ## minimum starting files
 
 # HMM data for gene identification
 hmm_db = config.get('hmm_db', 
-                    '/mnt/delong/scratch2/jmeppley/nanopore_biller/checkv_afvgs/gene_concat/VOG/VOGS.hmm')
-vog_metadata_table = config.get('vog_tsv', '/mnt/delong/seqdbs/VOG/2021.07/VOGS.tsv')
+                    'test/data/VOGS.hmm')
 
 # dict from a source label to a fasta of genomes
-genomes_source_file = config.get('genomes_source_file', f'{name}.fasta.sources.tsv')
+genomes_source_file = config.get('genomes_source_file', f'test/data/genome.sources.tsv')
 
-## alternate starting point (for genomes)
+EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
+TMP_DIR="/nvram/jmeppley"
+SCRATCH_DIR="/data/jmeppley/tmp"
+
+## other configuration
 # collected genomes in one fasta file
-genomes_fasta = config.get('genomes_fasta', f'{name}.fasta')
+genomes_fasta = config.get('genomes_fasta', f'{prefix}.fasta')
 # dict from seq ID to source
-genome_source_file = config.get('genome_source_file', f'{name}.sequence.sources.tsv')
+genome_source_file = config.get('genome_source_file', f'{prefix}.sequence.sources.tsv')
 
 #defaults
 config.setdefault('hmmer_threads', 4)
@@ -42,20 +49,20 @@ wildcard_constraints:
     cutoff=r'(0|0?\.\d+)',
     mcl_i=r'(\d+|\.\d+|\d+\.\d*)',
 
-mcl_template = "{name}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl"
+mcl_template = "{prefix}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl"
 cutoffs = [0,.25,.5]
 mcl_is = [2,5]
-mcl_outputs = expand("{name}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl",
+mcl_outputs = expand("{prefix}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl",
                      cutoff=cutoffs, 
                      mcl_i=mcl_is,
-                     name=[name,]
+                     prefix=[prefix,]
                     )
 
 rule output:
     """ This workflow creates 6 MCL output files """
     input: 
         mcl_outputs,
-        f"{name}.metadata.tsv"
+        f"{prefix}.metadata.tsv"
         
 rule collect_genomes:
     input: genomes_source_file
@@ -72,7 +79,7 @@ rule collect_genomes:
         with open(str(output.fasta), 'wt') as fasta_out:
             for source, fasta_file in pandas.read_csv(str(input), sep='\t', 
                                                       usecols=[0,1], 
-                                                      header=None).values:
+                                                     ).values:
                 count += 1
                 if count == 1 and not os.path.exists(fasta_file):
                     # the first line might just be a header
@@ -90,9 +97,9 @@ rule collect_genomes:
 rule prodigal:
     input: genomes_fasta
     output: 
-        faa="{name}.prodigal.faa",
-        gff="{name}.prodigal.gff",
-    log: "{name}.prodigal.log"
+        faa="{prefix}.prodigal.faa",
+        gff="{prefix}.prodigal.gff",
+    log: "{prefix}.prodigal.log"
     params:
         meta="-p meta" if config.get('prodigal_meta', True) else ""
     threads: config.get('prodigal_threads', 100)  # default is high because this is a bottleneck
@@ -105,10 +112,10 @@ rule prodigal:
     
 rule hmmer_batch:
     input:
-        faa="{name}.prodigal.faa",
+        faa="{prefix}.prodigal.faa",
         hmm=hmm_db,
-    output: "{name}.vs.HMMs.tbl"
-    log: "{name}.vs.HMMs.tbl.log"
+    output: "{prefix}.vs.HMMs.tbl"
+    log: "{prefix}.vs.HMMs.tbl.log"
     threads: config.get('hmmer_batch_threads', 20)
     shell: """
         let N={threads}/{config[hmmer_threads]}
@@ -120,8 +127,8 @@ rule hmmer_batch:
 
 rule hmmer_filter:
     """ condense tbl file into best hits """
-    input: "{name}.vs.HMMs.tbl"
-    output: "{name}.vs.HMMs.E.001.sort.F0.tbl"
+    input: "{prefix}.vs.HMMs.tbl"
+    output: "{prefix}.vs.HMMs.E.001.sort.F0.tbl"
     threads: 3
     shell: """
         filter_blast_m8.py {input} -f hmmsearchdom -E .001 \
@@ -131,28 +138,33 @@ rule hmmer_filter:
              > {output} \
              2> {output}.filter_2.log """
         
-EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
-TMP_DIR="/nvram/jmeppley"
-SCRATCH_DIR="/data/jmeppley/tmp"
+
 rule eggnog_annots:
-    """ runs eggnog mapper on the gene predictions """
+    """ runs eggnog mapper on the gene predictions 
+    
+    Note: emapper seems to fail if the input/output files are not in the current dir
+    """
     input:
-        faa="{name}.prodigal.faa"
+        faa="{prefix}.prodigal.faa"
     output:
-        annot="{name}.prodigal.emapper.annotations"
-    log: "{name}.prodigal.emapper.log"
+        annot="{prefix}.prodigal.emapper.annotations"
+    log: "{prefix}.prodigal.emapper.log"
     params:
-        out_pref="{name}.prodigal"
+        faa=f"{name}.prodigal.faa",
+        out_pref=f"{name}.prodigal"
     threads: config.get('emapper_threads', 40)
     shell:
-        "emapper.py \
-            -i {input.faa} \
+        """
+        cd {working_dir} && \
+        emapper.py \
+            -i {params.faa} \
             --output {params.out_pref} \
             --temp_dir {TMP_DIR} \
             --scratch_dir {SCRATCH_DIR} \
             --cpu {threads} -m diamond \
             --data_dir {EGGNOG_DATA_DIR} \
-            > {log} 2>&1"
+            > {name}.prodigal.emapper.log 2>&1
+        """
 
 hlen_rexp = re.compile('\d+\s+VOG\d+\s+-\s+(\d+)')
 def get_hlen(hit):
@@ -161,11 +173,10 @@ def get_hlen(hit):
 rule gene_annots:
     """ condense tbl file and eggnog annots into  gene_table """
     input: 
-        faa="{name}.prodigal.faa",
-        tbl= "{name}.vs.HMMs.E.001.sort.F0.tbl",
-        eggnog="{name}.prodigal.emapper.annotations",
-        vog_md=vog_metadata_table
-    output: "{name}.genes.tsv"
+        faa="{prefix}.prodigal.faa",
+        tbl= "{prefix}.vs.HMMs.E.001.sort.F0.tbl",
+        eggnog="{prefix}.prodigal.emapper.annotations",
+    output: "{prefix}.genes.tsv"
     run:
         import pandas
         # parse the eggnog mapper annotations file into a dict from gene to OG
@@ -205,35 +216,20 @@ rule gene_annots:
              for gene, annot in gene_table.annot.items()
             ]
         
-        # alternate annot (using root OG instead of tax-specific OG)
-        gene_table['annot_r'] = [v if pandas.notna(v) else r 
+        # alternate annot (using root eggNOG OG first and falling back to VOG)
+        gene_table['annot_e'] = [r if pandas.notna(r) else v 
                                  for v,r in gene_table[['vog',
                                                         'eggnog_root']].values]
         
-        # pull description column from VOG metadata or EGGNOG annots
-        vog_annots = pandas.read_csv(str(input.vog_md), sep='\t', index_col=0)
-        def get_gene_desc(gene, vog, og, annot):
-            if pandas.isna(annot) or len(annot.strip()) == 0:
-                return None
-            if annot == vog:
-                # drop the first word of the VOG description
-                vog_desc = vog_annots.ConsensusFunctionalDescription[vog]
-                return " ".join(vog_desc.split()[1:])
-            elif annot == og:
-                return eggnog_annots.Description[gene]
-    
-        gene_table['desc'] = [get_gene_desc(gene, vog, og, annot)
-                              for gene, vog, og, annot 
-                              in gene_table.reset_index()[['gene', 'vog', 'eggnog', 'annot']].values]
-                
+
         # write out gene_table
         gene_table.to_csv(str(output), sep='\t')
 
 ## MCL clustering on shared gene ratio
 rule calc_all_scores:
     """ build a score matrix based on shared gene pairs """
-    input: "{name}.genes.tsv"
-    output: "{name}.shared.gene.scores.c0.abc"
+    input: "{prefix}.genes.tsv"
+    output: "{prefix}.shared.gene.scores.c0.abc"
     run:
         # score each genome pair on how much of the annotated length is in shared gene families
         scores = {}
@@ -279,8 +275,10 @@ rule calc_all_scores:
                 abc_out.write(f"{genome1}\t{genome2}\t{score}\n")
     
 rule filt_scores:
-    input: "{name}.shared.gene.scores.c0.abc"
-    output: "{name}.shared.gene.scores.c{cutoff}.abc"
+    input: "{prefix}.shared.gene.scores.c0.abc"
+    output: "{prefix}.shared.gene.scores.c{cutoff}.abc"
+    wildcard_constraints:
+        cutoff=r'0\.\d+'
     run:
         cutoff = float(wildcards.cutoff)
         with open(str(output), 'wt') as scores_out:
@@ -301,8 +299,8 @@ rule mcl:
 
 ## Bipartite modules
 rule bipartite_modules:
-    input: "{name}.genes.tsv"
-    output: "{name}.bipartite.modules.json"
+    input: "{prefix}.genes.tsv"
+    output: "{prefix}.bipartite.modules.json"
     run:
         import json
         import pandas
@@ -311,7 +309,7 @@ rule bipartite_modules:
         output_data = {}
 
         # load gene data, but only keep annotated genes
-        annot_col = "annot_r"
+        annot_col = "annot_e"
         gene_table = pandas.read_csv(str(input), sep='\t', index_col=0)
         gene_table = gene_table[gene_table[annot_col].notna()]
 
@@ -475,13 +473,13 @@ rule bipartite_modules:
 rule summarize_genomes:
     """ make a table of genome meatadata for quick access """
     input: 
-        genes="{name}.genes.tsv",
+        genes="{prefix}.genes.tsv",
         fasta=genomes_fasta,
         clusters=mcl_outputs,
         modules=rules.bipartite_modules.output,
         sources=genome_source_file,
     output:
-        "{name}.metadata.tsv"
+        "{prefix}.metadata.tsv"
     run:
         import pandas, numpy
         from Bio import SeqIO

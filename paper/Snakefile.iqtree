@@ -1,53 +1,114 @@
 """
-Given a collection of folders with consistent names, each conatining at least one FAA file of genes named by HMM:
+Given:
 
- * align all genes to HMMs
- * concatentate multiple alignments if multiple HMMs ina  subfolder
+ * a faa file of gene sequences
+ * a table of gene annotations
+ * a gene family name (or multiple)
+ * an HMM file corresponding to the annotations
+ 
+Do:
+
+ * pull out genes annotated with gene family/families 
+ * align all genes to corresponding HMM
+ * concatentate multiple alignments if multiple HMMs in a subfolder
  * trim alignments of sparse data
  * infer tree with IQtree
 """
 
-import re
+import re, pandas
 from jme.jupy_tools.experimental import cluster_trees
-from Bio import Align, Seq, SeqRecord, AlignIO
+from Bio import Align, Seq, SeqRecord, AlignIO, SeqIO
 from collections import defaultdict
 
+##############
+# configure
+
+# output location
+working_dir = config.get('working_dir', 'test/run')
+
+# input data
+# gene of comma and semicolon separated list of genes
+# semicolons separate trees, commoa separate genes
+# EG:
+#  make one tree using the integrase vog: tree_annot="VOG00035"
+#  make a tree joining two VOGs: tree_annot="VOG00035,VOG000520"
+#  make both of the above trees: tree_annot="VOG00035;VOG00035,VOG000520"
+tree_annot = config.get('tree_annot', 'VOG00035')   
+
+gene_faa = config.get('gene_faa', f'{working_dir}/genomes.prodigal.faa')
+gene_tsv = config.get('gene_tsv', f'{working_dir}/genomes.genes.tsv')
+annot_col = config.get('annot_col', 'vog')
+hmm_db = config.get('hmm_db', 
+                    'test/data/VOGS.hmm')
+
+# naming schemes (don't modify)
 genes_template = '{tree_dir}/{vog}.faa'
 align_template = "{tree_dir}/{vog}.aln"
-
 bootstraps = config.get('bootstraps', 0)
-specific_tree_dir = config.get('specific_tree_dir', None)
-tree_dir_rexp = config.get('tree_dir_rexp', '^tree_cl[^/]+$')
-vog_faa_rexp = config.get('vog_faa_rexp', '^VOG\d+$')
 vog_hmm_dir = config.get('vog_hmm_dir',
-                         '/mnt/delong/scratch2/jmeppley/nanopore_biller/checkv_afvgs/gene_concat/VOG')
+                         f'{working_dir}/VOG_tmp')
 
 hmm_template = f'{vog_hmm_dir}/{{vog}}.hmm'
 
-
-# find VOG faa files in each tree dir
-tree_vogs = {}
-if specific_tree_dir:
-    vogs, = glob_wildcards(specific_tree_dir + "/{vog}.faa")
-    tree_vogs[specific_tree_dir] = vogs
-else:
-    for tree_dir, vog in zip(*glob_wildcards(genes_template)):
-        if re.search(tree_dir_rexp, tree_dir) and re.search(vog_faa_rexp, vog):
-            tree_vogs.setdefault(tree_dir, []).append(vog)
+tree_dirs = [f"{working_dir}/tree_{re.sub(',','.',annot)}"
+             for annot in tree_annot.split(";")]
 
 rule all:
     input: expand("{tree_dir}/cat.LGG.b{bootstraps}.iqtree", \
                   bootstraps=[bootstraps,], \
-                  tree_dir=tree_vogs.keys())
+                  tree_dir=tree_dirs)
 
 rule filt_alns_only:
     input: expand("{tree_dir}/align.filter.fasta", \
-                  tree_dir=tree_vogs.keys())
+                  tree_dir=tree_dirs)
+
+rule pull_genes:
+    input:
+        faas=gene_faa,
+        tsv=gene_tsv,
+    output: genes_template
+    run:
+        # get set of gene IDs annotated with this VOG
+        gene_df = pandas.read_csv(str(input.tsv), sep='\t', index_col=0)
+        gene_ids = set(gene_df.query(f'vog == "{wildcards.vog}"').index)
         
-rule vog_alns_only:
-    input: [align_template.format(vog=vog, tree_dir=tree_dir) \
-            for tree_dir, vogs in tree_vogs.items() \
-            for vog in vogs]
+        # Pull genes from faa
+        out_dir = os.path.dirname(str(output))
+        os.makedirs(out_dir, exist_ok=True)
+        with open(str(output), 'wt') as faa_out:
+            for gene in SeqIO.parse(str(input.faas), 'fasta'):
+                if gene.id in gene_ids:
+                    faa_out.write(gene.format('fasta'))
+
+rule pull_hmm:
+    """ extract requested HMM model into individual file for hmmalign """
+    input: hmm_db
+    output: hmm_template
+    run:
+        with open(str(output), 'wt') as hmm_out:
+            with open(str(input)) as hmm_in:
+                model_lines = []
+                for line in hmm_in:
+                    model_lines.append(line)
+                    if line.startswith('//'):
+                        if name == wildcards.vog:
+                            hmm_out.write("".join(model_lines))
+                        model_lines = []
+                        continue
+                    try:
+                        name = re.search(r'^NAME\s+(.+\S)\s*$', line).group(1).strip()
+                    except:
+                        pass
+        
+def get_tree_vogs(tree_dir):
+    gene_str = re.search(r'\btree_(.+)$', tree_dir).group(1)
+    return gene_str.split('.')
+
+def get_tree_alignments(wildcards):
+    tree_dir = wildcards.tree_dir
+    gene_list = get_tree_vogs(tree_dir)
+    return [align_template.format(tree_dir=tree_dir, vog=gene)
+            for gene in gene_list]
 
 rule align_tree_dir_vog:
     input:
@@ -59,14 +120,14 @@ rule align_tree_dir_vog:
             > {output}.log 2>&1"
 
 rule cat_tree_dir_alignment:
-    input: lambda w: expand(align_template, tree_dir=w.tree_dir, vog=tree_vogs[w.tree_dir])
+    input: get_tree_alignments
     output: "{tree_dir}/align.fasta"
     run:
         tree_dir = wildcards.tree_dir
         align_files_by_vog = {
             vog: align_template.format(tree_dir=tree_dir,
                                        vog=vog)
-            for vog in tree_vogs[tree_dir] 
+            for vog in get_tree_vogs(tree_dir) 
         }
         final_alignment = cluster_trees.cat_tree_dir_alignment(align_files_by_vog)
 

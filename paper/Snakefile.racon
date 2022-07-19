@@ -6,13 +6,10 @@ Finish up with cd-hit to dereplicate the polished sequences.
 Modified from Elaine's bash script.
 """
 
-
-raw_fasta = config.get('raw_fasta', 'chosen_polished_repeat_fragments.fasta')
-short_reads = config.get('short_reads', 
-                         ('/mnt/delong/scratch2/elaine/nanopore/nanopore/'
-                          '2020-08/HOT319-25m-tailed-phage/reads/'
-                          'HSD00-20a-319-25m-LV-Tailed-Phage.clean.uniqname.fastq'))
-name = config.get('name', 'PIPRs')
+working_dir = config.get('working_dir', 'test/run')
+raw_fasta = config.get('raw_fasta', f'{working_dir}/polished_fragments.fasta')
+short_reads = config.get('short_reads', f'test/data/short_reads.fastq')
+name = config.get('name', 'polished_fragments')
 
 rule target_outputs:
     """ list as inputs the files we want to make
@@ -22,18 +19,18 @@ rule target_outputs:
     
     """
     input:
-        f"{name}.gene.mean_length",
-        f"racon/{name}.polished.gene.mean_length",
-        f"racon/{name}.2x.polished.gene.mean_length",
-        f"{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
+        f"{working_dir}/{name}.gene.mean_length",
+        f"{working_dir}/racon/{name}.polished.gene.mean_length",
+        f"{working_dir}/racon/{name}.2x.polished.gene.mean_length",
+        f"{working_dir}/{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
         
         
-if raw_fasta != f"{name}.fasta":
+if raw_fasta != f"{working_dir}/{name}.fasta":
     # we only need this rule if the input file has a differnt name
     rule local_fasta:
         """ Link external file to standard local name """
         input: raw_fasta
-        output: f"{name}.fasta"
+        output: f"{working_dir}/{name}.fasta"
         shell: "ln -s {input} {output}"
             
 ###### gene calling
@@ -79,23 +76,23 @@ rule calc_mean_gene_length:
 ###### racon
 
 rule bwa_index:
-    input: "{name}.fasta"
-    output: "mapping/{name}.bwadb.bwt"
-    log: "mapping/{name}.bwadb.log"
-    benchmark: "mapping/{name}.bwadb.time"
+    input: "{working_dir}/{name}.fasta"
+    output: "{working_dir}/mapping/{name}.bwadb.bwt"
+    log: "{working_dir}/mapping/{name}.bwadb.log"
+    benchmark: "{working_dir}/mapping/{name}.bwadb.time"
     params:
-        db="mapping/{name}.bwadb"
+        db="{working_dir}/mapping/{name}.bwadb"
     shell: "bwa index -p {params.db} {input} > {log} 2>&1"
 
 rule bwa_mem:
     input:
         reads=short_reads,
-        db="mapping/{name}.bwadb.bwt"
-    output: "mapping/{name}.v.all_QC.uniq.sam"
-    log: "mapping/{name}.v.all_QC.uniq.log"
-    benchmark: "mapping/{name}.v.all_QC.uniq.time"
+        db="{working_dir}/mapping/{name}.bwadb.bwt"
+    output: "{working_dir}/mapping/{name}.v.all_QC.uniq.sam"
+    log: "{working_dir}/mapping/{name}.v.all_QC.uniq.log"
+    benchmark: "{working_dir}/mapping/{name}.v.all_QC.uniq.time"
     params:
-        db="mapping/{name}.bwadb"
+        db="{working_dir}/mapping/{name}.bwadb"
     threads: 60
     shell: "bwa mem -t {threads} {params.db} {input.reads} \
                 > {output} \
@@ -105,10 +102,10 @@ rule racon:
     input:
         reads=short_reads,
         sam=rules.bwa_mem.output,
-        fasta="{name}.fasta"
-    output: "racon/{name}.polished.fasta"
-    log: "racon/{name}.polished.log"
-    benchmark: "racon/{name}.polished.time"
+        fasta="{working_dir}/{name}.fasta"
+    output: "{working_dir}/racon/{name}.polished.fasta"
+    log: "{working_dir}/racon/{name}.polished.log"
+    benchmark: "{working_dir}/racon/{name}.polished.time"
     threads: 60
     shell: "racon -t {threads} -u \
               {input.reads} {input.sam} {input.fasta} \
@@ -124,18 +121,18 @@ rule double_racon:
          * once with name == AFVGs
          * again with name == AFVGs.2x
     """
-    input: "racon/{name}.polished.fasta"
-    output: "{name}.2x.fasta"
-    shell: "ln -s {input} {output}"
+    input: ancient("{working_dir}/racon/{name}.polished.fasta")
+    output: "{working_dir}/{name}.2x.fasta"
+    shell: "ln {input} {output}"
 
         
 ##### cdhit
 
 rule cd_hit_est:
-    input: "racon/{name}.2x.polished.fasta"
-    output: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
-    log: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta.log"
-    benchmark: "{name}.2x.racon.c.95.aS.5.G0.g0.fasta.time"
+    input: "{working_dir}/racon/{name}.2x.polished.fasta"
+    output: "{working_dir}/{name}.2x.racon.c.95.aS.5.G0.g0.fasta"
+    log: "{working_dir}/{name}.2x.racon.c.95.aS.5.G0.g0.fasta.log"
+    benchmark: "{working_dir}/{name}.2x.racon.c.95.aS.5.G0.g0.fasta.time"
     threads: 60
     shell:
         "cd-hit-est -T {threads} -M 0 \
