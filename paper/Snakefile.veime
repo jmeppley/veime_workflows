@@ -126,7 +126,6 @@ rule compare_drafts:
         drafts='{prefix}/drafts.fasta'
     output: '{prefix}/medaka.v.drafts.paf'
     benchmark: '{prefix}/medaka.v.drafts.paf.time'
-    conda: '../conda/cluster.yaml'
     shell: 'minimap2 -x map-ont {input.drafts} {input.final} \
             > {output} \
             2> {output}.log'
@@ -148,7 +147,6 @@ rule minimap_4_reference:
     input: '{prefix}/{read}/all.fasta'
     output: '{prefix}/{read}/all.v.all.paf'
     benchmark: '{prefix}/{read}/all.v.all.paf.time'
-    conda: 'cluster.yaml'
     threads: MM_THREADS
     shell: 'minimap2 -t {threads} -x ava-ont {input} {input} > {output}'
 
@@ -161,7 +159,6 @@ rule pick_ref_from_paf:
         ref='{prefix}/{read}/draft.0.fasta',
         others='{prefix}/{read}/others.fasta'
     benchmark: '{prefix}/{read}/draft.0.fasta.time'
-    conda: 'cluster.yaml'
     script: 'pick_ref_from_paf.py'        
 
 rule minimap_4_racon:
@@ -170,7 +167,6 @@ rule minimap_4_racon:
         reads='{prefix}/{read}/others.fasta'
     output: "{prefix}/{read}/draft.{racon_i}.sam"
     benchmark: "{prefix}/{read}/draft.{racon_i}.sam.time"
-    conda: 'cluster.yaml'
     threads: MM_THREADS
     shell: 'minimap2 -t {threads} -ax map-ont {input.draft} {input.reads} > {output}'
         
@@ -181,7 +177,6 @@ rule racon_iter:
         sam="{prefix}/{read}/draft.{racon_i}.sam"
     output: '{prefix}/{read}/draft.{racon_i}.fasta'
     benchmark: '{prefix}/{read}/draft.{racon_i}.fasta.time'
-    conda: 'polish.yaml'
     threads: POLISH_THREADS
     shell: 'racon --include-unpolished \
                 --quality-threshold={MIN_Q} \
@@ -195,18 +190,20 @@ rule medaka:
         reads='{prefix}/{read}/others.fasta',
         draft=lambda w: '{prefix}/{read}/draft.{racon_iters}.fasta' \
                             .format(racon_iters=RACON_ITERS, **w)
-    output: '{prefix}/{read}/medaka.fasta'
+    output:
+        fasta='{prefix}/{read}/medaka.fasta',
+        hdf='{prefix}/{read}/consensus_probs.hdf'
     benchmark: '{prefix}/{read}/medaka.fasta.time'
     params:                                                                                      
         out_dir='{prefix}/{read}',
         model=config.get('MEDAKA_model', 'r941_min_high_g303')                                                          
-    conda: 'polish.yaml'
     threads: POLISH_THREADS
     shell:                                                                                       
-        """medaka_consensus -i {input.reads} -d {input.draft} \
+        """rm -f {params.out_dir}/consensus.fasta
+           medaka_consensus -i {input.reads} -d {input.draft} \
             -o {params.out_dir} -t {threads} -m {params.model} \
             > {params.out_dir}.log 2>&1
-           mv {params.out_dir}/consensus.fasta {output}"""
+           mv {params.out_dir}/consensus.fasta {output.fasta}"""
         
 ruleorder: pick_ref_from_paf > racon_iter
     
@@ -256,6 +253,5 @@ rule prodigal:
     wildcard_constraints:
         name='(?!polished)[^/]+'
     benchmark: '{prefix}/{name}.gff.time'
-    conda: '../conda/genes.yaml'
     shell: 'prodigal -a {output.faa} -f gff -o {output.gff} -p meta -i {input} \
             > {output.gff}.log 2>&1'

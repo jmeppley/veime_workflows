@@ -1,6 +1,10 @@
 ## specific to this repo
 test/run
-.snakemake
+.snakemake/
+.batch_launcher/
+
+## vim temp files
+*.sw[po]
 
 ## Default python stuff from GitHub
 # Byte-compiled / optimized / DLL files

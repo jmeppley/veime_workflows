@@ -23,6 +23,15 @@ working_dir = config.get('working_dir', 'test/run')
 name = config.get('name', 'genomes')
 prefix = f"{working_dir}/{name}"
 
+# eggnog annotations
+# supply a location to use eggnog annots
+EGGNOG_DATA_DIR = config.get('eggnog_data_dir', None)
+#EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
+# set these to fast scratch disks for better performance (They can be the same
+# or different)
+EGGNOG_TMP_DIR = config.get('eggnog_tmp_dir', working_dir + "/tmp")
+EGGNOG_SCRATCH_DIR = config.get('eggnog_scratch_dir', working_dir + "/tmp")
+
 ## minimum starting files
 
 # HMM data for gene identification
@@ -31,10 +40,6 @@ hmm_db = config.get('hmm_db',
 
 # dict from a source label to a fasta of genomes
 genomes_source_file = config.get('genomes_source_file', f'test/data/genome.sources.tsv')
-
-EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
-TMP_DIR="/nvram/jmeppley"
-SCRATCH_DIR="/data/jmeppley/tmp"
 
 ## other configuration
 # collected genomes in one fasta file
@@ -139,32 +144,43 @@ rule hmmer_filter:
              2> {output}.filter_2.log """
         
 
-rule eggnog_annots:
-    """ runs eggnog mapper on the gene predictions 
-    
-    Note: emapper seems to fail if the input/output files are not in the current dir
-    """
-    input:
-        faa="{prefix}.prodigal.faa"
-    output:
-        annot="{prefix}.prodigal.emapper.annotations"
-    log: "{prefix}.prodigal.emapper.log"
-    params:
-        faa=f"{name}.prodigal.faa",
-        out_pref=f"{name}.prodigal"
-    threads: config.get('emapper_threads', 40)
-    shell:
+if EGGNOG_DATA_DIR is not None:
+    rule eggnog_annots:
+        """ runs eggnog mapper on the gene predictions 
+        
+        Note: emapper seems to fail if the input/output files are not in the current dir
         """
-        cd {working_dir} && \
-        emapper.py \
-            -i {params.faa} \
-            --output {params.out_pref} \
-            --temp_dir {TMP_DIR} \
-            --scratch_dir {SCRATCH_DIR} \
-            --cpu {threads} -m diamond \
-            --data_dir {EGGNOG_DATA_DIR} \
-            > {name}.prodigal.emapper.log 2>&1
+        input:
+            faa="{prefix}.prodigal.faa"
+        output:
+            annot="{prefix}.prodigal.emapper.annotations"
+        log: "{prefix}.prodigal.emapper.log"
+        params:
+            faa=f"{name}.prodigal.faa",
+            out_pref=f"{name}.prodigal"
+        threads: config.get('emapper_threads', 40)
+        shell:
+            """
+            cd {working_dir} && \
+            emapper.py \
+                -i {params.faa} \
+                --output {params.out_pref} \
+                --temp_dir {EGGNOG_TMP_DIR} \
+                --scratch_dir {EGGNOG_SCRATCH_DIR} \
+                --cpu {threads} -m diamond \
+                --data_dir {EGGNOG_DATA_DIR} \
+                > {name}.prodigal.emapper.log 2>&1
+            """
+else:
+    rule eggnog_annots:
+        """ 
+        Creates dummy eggnog mapper output file
         """
+        input:
+            faa="{prefix}.prodigal.faa"
+        output:
+            annot=touch("{prefix}.prodigal.emapper.annotations")
+
 
 hlen_rexp = re.compile('\d+\s+VOG\d+\s+-\s+(\d+)')
 def get_hlen(hit):
@@ -182,16 +198,23 @@ rule gene_annots:
         # parse the eggnog mapper annotations file into a dict from gene to OG
         from jme.jupy_tools.utils import parse_eggnog_annotations
         # we only need the tax_og column
-        eggnog_annots = parse_eggnog_annotations(str(input.eggnog))
-        eggnog_og_dict = eggnog_annots['tax_og'].to_dict()
+        no_eggnog = os.path.getsize(str(input.eggnog)) == 0
+        if no_eggnog:
+            eggnog_og_dict = {}
+        else:
+            eggnog_annots = parse_eggnog_annotations(str(input.eggnog))
+            eggnog_og_dict = eggnog_annots['tax_og'].to_dict()
 
         # parse the gene names, starts, and ends from the faa file and add eggnog annotations
         from jme.jupy_tools.experimental.gene_synteny import import_genes
         gene_table = import_genes(str(input.faa),
                                   eggnog_og_dict)
         gene_table['eggnog'] = gene_table['annot']
-        gene_table['eggnog_root'] = [eggnog_annots.root_og.get(g, None)
-                                     for g in gene_table.index]
+        if no_eggnog:
+            gene_table['eggnog_root'] = [None for g in gene_table.index]
+        else:
+            gene_table['eggnog_root'] = [eggnog_annots.root_og.get(g, None)
+                                         for g in gene_table.index]
 
         # add hmm results to gene table, overwriting eggnog annot with VOG hit
         from edl.blastm8 import generate_hits, HMMSEARCHDOM
