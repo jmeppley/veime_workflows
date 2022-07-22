@@ -1,5 +1,5 @@
 
-= Workflows for making VEIMEs
+# Workflows for making VEIMEs
 
 This repo contains a collection of makefiles that will take concatemeric long
 reads, generate polished monomers, cluster the results alongside erference
@@ -15,7 +15,7 @@ is:
 You will also need to download the VOG HMM db and eggnog DB for the last two
 steps (clustering and tree building).
 
-== Installation
+## Installation
 
 First, clone this repository locally.
 
@@ -28,7 +28,7 @@ Note: replace "conda" with "mamba" for faster installation.
 At this point, you can test the installation with the reduced set of data in ./test/data
 without downlading any database.
 
-== Test Run
+## Test Run
 The following commands will run through the workflows. Note, that for the
 snakemake commandas, you can alther the number of threads used with the "-j"
 option.
@@ -60,15 +60,15 @@ Optionally, build a tree of tyrosine integrases:
 Note, iqtree will fail if you request more threads (via -j) than are available on your
 system.
 
-== Download Databases
+## Download Databases
 
 Finally, to run on real data, you'll need to download the VOG and EggNOG
 databases:
 
-=== VOGDB
+### VOGDB
   
 To get the latest VOG definitions, create a local folder to store them in,
-download and upack the archive, and concatenate all the hmm files into one DB:
+[download](https://vogdb.org/download) and upack the archive, and concatenate all the hmm files into one DB:
 
    mkdir -p /local/path/to/VOGS
    wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
@@ -76,7 +76,7 @@ download and upack the archive, and concatenate all the hmm files into one DB:
    cat VOG[0-9]*.hmm > VOGS.hmm
 
 
-=== EggNOG
+### EggNOG
 
 Eggnog mapper, installed in the conda environment, comes with a script to
 download the database for you. All you have to do is tell snakemake where to
@@ -92,7 +92,7 @@ If you do not speciy an eggnog DB location, only HMM annotations are used.
 If you do specify an eggnog datanase, you must tell snakemake to use conda. The 
 eggnog environment is incompatible with other items in the main environment.
 
-=== Specifying databse locations
+### Specifying databse locations
 
 When running the Snakemake.module or snakemake.iqtree workflows, specify
 database locations as follows:
@@ -102,7 +102,7 @@ database locations as follows:
                  eggnog_data_dir=/local/path/to/eggnog_data \
         --use-conda --conda-frontend=mamba
 
-== Configuring the Workflows
+## Configuring the Workflows
 As with the database locations (see above), configuration parameters can be
 specified on the command line with the "--config key=value" pattern. User
 modifiable params are found at the top of each Snakefile. Other than the
