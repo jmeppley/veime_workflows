@@ -3,17 +3,17 @@ channels:
     - bioconda
     - jmeppley
 dependencies:
+    - mamba
     - snakemake-minimal
     - pandas
     - biopython==1.76
     - prodigal
-    - eggnog-mapper
     - minimap2
     - samtools
     - bwa
     - last
     - mcl
-    - igraph-python
+    - python-igraph
     - leidenalg
     - medaka==0.11.0
     - racon

@@ -28,11 +28,6 @@ Note: replace "conda" with "mamba" for faster installation.
 At this point, you can test the installation with the reduced set of data in ./test/data
 without downlading any database.
 
-Finally, to run on real data, you'll need to download the VOG and EggNOG
-databases:
-
-### TODO ###
-
 == Test Run
 The following commands will run through the workflows. Note, that for the
 snakemake commandas, you can alther the number of threads used with the "-j"
@@ -54,11 +49,70 @@ Polish again, but with short reads:
 
     snakemake -s paper/Snakefile.racon -j 10 -p
 
-Cluster polished monomers alongside known satellites:
+Optionally, cluster polished monomers alongside known satellites:
 
     snakemake -s paper/Snakefile.module -j 10 -p
 
-Build a tree of tyrosine integrases:
+Optionally, build a tree of tyrosine integrases:
 
     snakemake -s paper/Snakefile.iqtree -j 10 -p
 
+Note, iqtree will fail if you request more threads (via -j) than are available on your
+system.
+
+== Download Databases
+
+Finally, to run on real data, you'll need to download the VOG and EggNOG
+databases:
+
+=== VOGDB
+  
+To get the latest VOG definitions, create a local folder to store them in,
+download and upack the archive, and concatenate all the hmm files into one DB:
+
+   mkdir -p /local/path/to/VOGS
+   wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
+   tar -zxvf vog.hmm.tar.gz
+   cat VOG[0-9]*.hmm > VOGS.hmm
+
+
+=== EggNOG
+
+Eggnog mapper, installed in the conda environment, comes with a script to
+download the database for you. All you have to do is tell snakemake where to
+store the data. The first time, snakemake will download the data. On subsequent
+runs, if you specify the same db location, the previously downlaoded data will
+be reused.
+
+WARNING: The current EggNOG database will take up about 50GB of space and needs
+an extra 20GB or so to download and uncompress files. 
+
+If you do not speciy an eggnog DB location, only HMM annotations are used.
+
+If you do specify an eggnog datanase, you must tell snakemake to use conda. The 
+eggnog environment is incompatible with other items in the main environment.
+
+=== Specifying databse locations
+
+When running the Snakemake.module or snakemake.iqtree workflows, specify
+database locations as follows:
+
+    snakemake -j 10 -p -s paper/Snakefile.module \
+        --config hmm_db=/local/path/to/VOGS/VOGS.hmm \
+                 eggnog_data_dir=/local/path/to/eggnog_data \
+        --use-conda --conda-frontend=mamba
+
+== Configuring the Workflows
+As with the database locations (see above), configuration parameters can be
+specified on the command line with the "--config key=value" pattern. User
+modifiable params are found at the top of each Snakefile. Other than the
+database locations, the most useful ones are:
+
+ * working_dir: (all workflows) this is where the output will be written
+ * reads_fasta: (Snakefile.frags) the initial set of concatemeric reads
+ * cmer_data: (Snakefile.frags) table with repeat sizes
+ * short_reads: (Snakefile.racon) fastq with short reads for polishing
+ * hmm_db: (Snakefile.module, Snakefile.iqtree) hmm file with VOG models
+ * eggnog_data_dir: (Snakefile.module) location to find (or put) eggnog
+ * eggnog_tmp_dir: (Snakefile.module) fast scratch location for tmp files
+ * tree_annot: (Snakefile.iqtree) gene or genes (HMM ids) to build trees on

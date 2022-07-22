@@ -1,5 +1,6 @@
 ## specific to this repo
 test/run
+conda.env/
 .snakemake/
 .batch_launcher/
 
