@@ -75,6 +75,9 @@ To get the latest VOG definitions, create a local folder to store them in,
    tar -zxvf vog.hmm.tar.gz
    cat VOG[0-9]*.hmm > VOGS.hmm
 
+You will also want to download the [VOG
+descriptions](http://fileshare.csb.univie.ac.at/vog/latest/vog.annotations.tsv.gz) file. This contains the
+functional annotations for each VOG family.
 
 ### EggNOG
 
@@ -116,3 +119,33 @@ database locations, the most useful ones are:
  * eggnog_data_dir: (Snakefile.module) location to find (or put) eggnog
  * eggnog_tmp_dir: (Snakefile.module) fast scratch location for tmp files
  * tree_annot: (Snakefile.iqtree) gene or genes (HMM ids) to build trees on
+
+## Troubleshooting
+
+### Check the log file first
+
+In general, if there is an error, snakemake will report something like this:
+
+    Error in rule align_tree_dir_vog:
+    jobid: 4
+    output: test/run/tree_VOG00035/VOG00035.aln
+    shell:
+        hmmalign -o test/run/tree_VOG00035/VOG00035.aln --amino --informat FASTA --trim  test/run/VOG_tmp/VOG00035.hmm test/run/tree_VOG00035/VOG00035.faa             > test/run/tree_VOG00035/VOG00035.aln.log 2>&1
+        (one of the commands exited with non-zero exit code; note that snakemake uses bash strict mode!)
+
+Most rules are configured to capture all output to rule-specific log files. The first thing to do is to look at the log file. In the case above:
+
+    $ cat test/run/tree_VOG00035/VOG00035.aln.log
+    
+    	Error: Sequence file test/run/tree_VOG00035/VOG00035.faa is empty or misformatted
+
+In this case, there were no genes found with VOG00035. 
+
+### Snakefile.iqtree: empty faa file
+If you encounter the error above, where the faa file for tree bulding is empty, check that the VOG is in your annotation table:
+
+    $ grep -c VOG00035 test/run/genomes.genes.tsv
+    0
+
+This can happen if you use default gene (VOG00035) for tree building or updated your VOG HMMs. The VOG ids can change between versions, and genes that were present before may have new names.
+

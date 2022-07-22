@@ -5,10 +5,10 @@ Given:
  * a table of gene annotations
  * a gene family name (or multiple)
  * an HMM file corresponding to the annotations
- 
+
 Do:
 
- * pull out genes annotated with gene family/families 
+ * pull out genes annotated with gene family/families
  * align all genes to corresponding HMM
  * concatentate multiple alignments if multiple HMMs in a subfolder
  * trim alignments of sparse data
@@ -33,12 +33,12 @@ working_dir = config.get('working_dir', 'test/run')
 #  make one tree using the integrase vog: tree_annot="VOG00035"
 #  make a tree joining two VOGs: tree_annot="VOG00035,VOG000520"
 #  make both of the above trees: tree_annot="VOG00035;VOG00035,VOG000520"
-tree_annot = config.get('tree_annot', 'VOG00035')   
+tree_annot = config.get('tree_annot', 'VOG00035')
 
 gene_faa = config.get('gene_faa', f'{working_dir}/genomes.prodigal.faa')
 gene_tsv = config.get('gene_tsv', f'{working_dir}/genomes.genes.tsv')
 annot_col = config.get('annot_col', 'vog')
-hmm_db = config.get('hmm_db', 
+hmm_db = config.get('hmm_db',
                     'test/data/VOGS.hmm')
 
 # naming schemes (don't modify)
@@ -71,7 +71,7 @@ rule pull_genes:
         # get set of gene IDs annotated with this VOG
         gene_df = pandas.read_csv(str(input.tsv), sep='\t', index_col=0)
         gene_ids = set(gene_df.query(f'vog == "{wildcards.vog}"').index)
-        
+
         # Pull genes from faa
         out_dir = os.path.dirname(str(output))
         os.makedirs(out_dir, exist_ok=True)
@@ -99,7 +99,7 @@ rule pull_hmm:
                         name = re.search(r'^NAME\s+(.+\S)\s*$', line).group(1).strip()
                     except:
                         pass
-        
+
 def get_tree_vogs(tree_dir):
     gene_str = re.search(r'\btree_(.+)$', tree_dir).group(1)
     return gene_str.split('.')
@@ -127,7 +127,7 @@ rule cat_tree_dir_alignment:
         align_files_by_vog = {
             vog: align_template.format(tree_dir=tree_dir,
                                        vog=vog)
-            for vog in get_tree_vogs(tree_dir) 
+            for vog in get_tree_vogs(tree_dir)
         }
         final_alignment = cluster_trees.cat_tree_dir_alignment(align_files_by_vog)
 
@@ -142,10 +142,10 @@ rule filter_tree_dir_alignment:
         filt_alignment = cluster_trees.filter_cat_alignment(full_alignment)
         with open(str(output), "wt") as align_out:
             align_out.write(filt_alignment.format('fasta'))
-        
+
 rule iqtree:
     input: rules.filter_tree_dir_alignment.output
-    output: 
+    output:
         report="{tree_dir}/cat.LGG.b{bootstraps}.iqtree",
     threads: lambda w: 10 if int(w.bootstraps) == 0 else 60
     params:
