@@ -10,27 +10,32 @@ Annotate and cluster genomes
 
 Outputs:
 
- * {working_dir}/{name}.metadata.tsv:           genomes with cluster and module asignments
- * {working_dir}/{name}.genes.tsv:              genome annotations
- * {working_dir}/{name}.bipartite.modules.json: module assignments for genes and genomes
+ * {WORKING_DIR}/{name}.metadata.tsv:           genomes with cluster and module asignments
+ * {WORKING_DIR}/{name}.genes.tsv:              genome annotations
+ * {WORKING_DIR}/{name}.bipartite.modules.json: module assignments for genes and genomes
  
 """
+import os
+
 ######
 # CONFIG
-working_dir = config.get('working_dir', 'test/run')
+WORKING_DIR = config.get('working_dir', 'test/run')
 
 # naming prefix for output files
-name = config.get('name', 'genomes')
-prefix = f"{working_dir}/{name}"
+NAME = config.get('name', 'genomes')
+PREFIX = f"{WORKING_DIR}/{NAME}"
 
 # eggnog annotations
 # supply a location to use eggnog annots
 EGGNOG_DATA_DIR = config.get('eggnog_data_dir', None)
+EGGNOG_DATA_DIR = os.path.abspath(EGGNOG_DATA_DIR)
 
 #EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
 # set these to fast scratch disks for better performance (They can be the same
 # or different)
-EGGNOG_TMP_DIR = config.get('eggnog_tmp_dir', working_dir + "/tmp")
+EGGNOG_TMP_DIR = config.get('eggnog_tmp_dir', "./tmp")      # local paths are
+                                                            # relative to
+                                                            # WORKING_DIR
 EGGNOG_SCRATCH_DIR = config.get('eggnog_scratch_dir', EGGNOG_TMP_DIR)
 
 ## minimum starting files
@@ -44,9 +49,9 @@ genomes_source_file = config.get('genomes_source_file', f'test/data/genome.sourc
 
 ## other configuration
 # collected genomes in one fasta file
-genomes_fasta = config.get('genomes_fasta', f'{prefix}.fasta')
+genomes_fasta = config.get('genomes_fasta', f'{PREFIX}.fasta')
 # dict from seq ID to source
-genome_source_file = config.get('genome_source_file', f'{prefix}.sequence.sources.tsv')
+genome_source_file = config.get('genome_source_file', f'{PREFIX}.sequence.sources.tsv')
 
 #defaults
 config.setdefault('hmmer_threads', 4)
@@ -61,14 +66,14 @@ mcl_is = [2,5]
 mcl_outputs = expand("{prefix}.shared.gene.scores.c{cutoff}.I{mcl_i}.mcl",
                      cutoff=cutoffs, 
                      mcl_i=mcl_is,
-                     prefix=[prefix,]
+                     prefix=[PREFIX,]
                     )
 
 rule output:
     """ This workflow creates 6 MCL output files """
     input: 
         mcl_outputs,
-        f"{prefix}.metadata.tsv"
+        f"{PREFIX}.metadata.tsv"
         
 rule collect_genomes:
     input: genomes_source_file
@@ -167,13 +172,15 @@ if EGGNOG_DATA_DIR is not None:
             annot="{prefix}.prodigal.emapper.annotations"
         log: "{prefix}.prodigal.emapper.log"
         params:
-            faa=f"{name}.prodigal.faa",
-            out_pref=f"{name}.prodigal"
+            faa=f"{NAME}.prodigal.faa",
+            out_pref=f"{NAME}.prodigal"
         threads: config.get('emapper_threads', 40)
         conda: "conda.eggnog.yaml"
         shell:
             """
-            cd {working_dir} && \
+            cd {WORKING_DIR} && \
+            mkdir -p {EGGNOG_TMP_DIR} && \
+            mkdir -p {EGGNOG_SCRATCH_DIR} && \
             emapper.py \
                 -i {params.faa} \
                 --output {params.out_pref} \
@@ -181,7 +188,7 @@ if EGGNOG_DATA_DIR is not None:
                 --scratch_dir {EGGNOG_SCRATCH_DIR} \
                 --cpu {threads} -m diamond \
                 --data_dir {EGGNOG_DATA_DIR} \
-                > {name}.prodigal.emapper.log 2>&1
+                > {NAME}.prodigal.emapper.log 2>&1
             """
 else:
     rule eggnog_annots:
