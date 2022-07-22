@@ -14,13 +14,17 @@ Do:
 """
 
 
+####
+# Configuration
 
+# user modifieable params:
 working_dir = config.get('working_dir', 'test/run')
 reads_fasta = config.get('reads_fasta', 'test/data/cmer_reads.fasta')
 cmer_data = config.get('cmer_data', 'test/data/cmer_reads.tsv')
 repeat_size_column = config.get('repeat_size_column', 'repeat_size')
-fragments_fasta = f'{working_dir}/fragments.fasta'
 output_dir = config.get('output_dir', f'{working_dir}/fragments')
+
+fragments_fasta = f'{working_dir}/fragments.fasta'
 
 rule all:
     input: output_dir

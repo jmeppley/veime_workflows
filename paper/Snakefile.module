@@ -26,11 +26,12 @@ prefix = f"{working_dir}/{name}"
 # eggnog annotations
 # supply a location to use eggnog annots
 EGGNOG_DATA_DIR = config.get('eggnog_data_dir', None)
+
 #EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
 # set these to fast scratch disks for better performance (They can be the same
 # or different)
 EGGNOG_TMP_DIR = config.get('eggnog_tmp_dir', working_dir + "/tmp")
-EGGNOG_SCRATCH_DIR = config.get('eggnog_scratch_dir', working_dir + "/tmp")
+EGGNOG_SCRATCH_DIR = config.get('eggnog_scratch_dir', EGGNOG_TMP_DIR)
 
 ## minimum starting files
 
@@ -145,13 +146,23 @@ rule hmmer_filter:
         
 
 if EGGNOG_DATA_DIR is not None:
+    rule eggnog_data:
+        output: 
+            dmnd=f'{EGGNOG_DATA_DIR}/eggnog_proteins.dmnd',
+            tax=f'{EGGNOG_DATA_DIR}/eggnog.taxa.db',
+            db=f'{EGGNOG_DATA_DIR}/eggnog.db'
+        conda: "conda.eggnog.yaml"
+        shell:
+            "download_eggnog_data.py --data_dir {EGGNOG_DATA_DIR} -y"
+
     rule eggnog_annots:
         """ runs eggnog mapper on the gene predictions 
         
         Note: emapper seems to fail if the input/output files are not in the current dir
         """
         input:
-            faa="{prefix}.prodigal.faa"
+            faa="{prefix}.prodigal.faa",
+            db=f'{EGGNOG_DATA_DIR}/eggnog.db'
         output:
             annot="{prefix}.prodigal.emapper.annotations"
         log: "{prefix}.prodigal.emapper.log"
@@ -159,6 +170,7 @@ if EGGNOG_DATA_DIR is not None:
             faa=f"{name}.prodigal.faa",
             out_pref=f"{name}.prodigal"
         threads: config.get('emapper_threads', 40)
+        conda: "conda.eggnog.yaml"
         shell:
             """
             cd {working_dir} && \
