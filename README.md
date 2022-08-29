@@ -23,7 +23,7 @@ Second, install the necessary software with conda:
 
     conda env create -p ./conda.env -f ./conda.yaml
 
-Note: replace "conda" with "mamba" for faster installation.
+Note: replace "conda" with "mamba" (if you have mamba installed) for faster installation.
 
 At this point, you can test the installation with the reduced set of data in ./test/data
 without downlading any database.
@@ -122,7 +122,33 @@ database locations, the most useful ones are:
 
 ## Troubleshooting
 
-### Check the log file first
+### Conda error on Mac M1 and M2 chips
+
+If you have the Apple M1 conda, some required binaries are missing. You will likely get an error like this:
+
+```
+Encountered problems while solving:
+  - nothing provides requested biopython
+  - nothing provides requested prodigal
+  - nothing provides requested samtools
+  ...
+```
+
+There are two easy-ish work arounds.
+
+(1) Install the Intel miniconda and use that instead of the Apple M1 conda. This is the simplest option. Software may be a little slower, but configuration will be much easier.
+
+(2) Configure the Apple M1 conda to use the Intel binaries when you need something specific. When you need to install something that's not available for M1/M2, you can configure conda to also look for intel binaries with:
+
+    conda config --add subdirs osx-64
+
+I would recommend reverting this change when you're done installing this repo with:
+
+    conda config --remove subdirs osx-64
+
+It's best to use primarily the arm binaries and only fall back to the intel ones when absolutely necessary. Avoid mixing binary types in your primary conda environment(s). Only try the intel binaries in separate, dedicated-use environments.
+
+### Snakemake errors: Check the log file first
 
 In general, if there is an error, snakemake will report something like this:
 
