@@ -72,10 +72,10 @@ databases:
 To get the latest VOG definitions, create a local folder to store them in,
 [download](https://vogdb.org/download) and upack the archive, and concatenate all the hmm files into one DB:
 
-   mkdir -p /local/path/to/VOGS
-   wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
-   tar -zxvf vog.hmm.tar.gz
-   cat VOG[0-9]*.hmm > VOGS.hmm
+    mkdir -p /local/path/to/VOGS
+    wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
+    tar -zxvf vog.hmm.tar.gz
+    cat VOG[0-9]*.hmm > VOGS.hmm
 
 You will also want to download the [VOG
 descriptions](http://fileshare.csb.univie.ac.at/vog/latest/vog.annotations.tsv.gz) file. This contains the
