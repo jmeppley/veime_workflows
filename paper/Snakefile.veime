@@ -202,7 +202,7 @@ rule racon_iter:
                 2> {output}.log'
 
 rule medaka:
-    input:                                                                                       
+    input:
         reads='{prefix}/{read}/others.fasta',
         draft=lambda w: '{prefix}/{read}/draft.{racon_iters}.fasta' \
                             .format(racon_iters=RACON_ITERS, **w)
@@ -210,20 +210,20 @@ rule medaka:
         fasta='{prefix}/{read}/medaka.fasta',
         hdf='{prefix}/{read}/consensus_probs.hdf'
     benchmark: '{prefix}/{read}/medaka.fasta.time'
-    params:                                                                                      
+    params:
         out_dir='{prefix}/{read}',
-        model=config.get('MEDAKA_model', 'r941_min_high_g303')                                                          
+        model=config.get('MEDAKA_model', 'r941_min_high_g303')
     threads: POLISH_THREADS
     conda: "conda.medaka.yaml"
-    shell:                                                                                       
+    shell:
         """rm -f {params.out_dir}/consensus.fasta
            medaka_consensus -i {input.reads} -d {input.draft} \
             -o {params.out_dir} -t {threads} -m {params.model} \
             > {params.out_dir}.log 2>&1
            mv {params.out_dir}/consensus.fasta {output.fasta}"""
-        
+
 ruleorder: pick_ref_from_paf > racon_iter
-    
+
 def comparison_inputs(wildcards, as_dict=False):
     " return a list or dict of faa files from polishing drafts "
     from snakemake.io import Namedlist

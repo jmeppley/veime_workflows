@@ -68,7 +68,7 @@ Finally, to run on real data, you'll need to download the VOG and EggNOG
 databases:
 
 ### VOGDB
-  
+
 To get the latest VOG definitions, create a local folder to store them in,
 [download](https://vogdb.org/download) and upack the archive, and concatenate all the hmm files into one DB:
 
@@ -90,7 +90,7 @@ runs, if you specify the same db location, the previously downlaoded data will
 be reused.
 
 WARNING: The current EggNOG database will take up about 50GB of space and needs
-an extra 20GB or so to download and uncompress files. 
+an extra 20GB or so to download and uncompress files.
 
 If you do not speciy an eggnog DB location, only HMM annotations are used.
 
@@ -124,11 +124,50 @@ database locations, the most useful ones are:
 
 ## Troubleshooting
 
-### MacOS is not supported
+### MacOS is not supported, but ...
 
-Sorry. As of now, some key dependencies are unavailable for MacOS. 
+As of now, some key dependencies are unavailable or unstable on MacOS. There is a
+workaround.
 
-### Snakemake errors: Check the log file first
+#### Apple Silicon and Bioconda
+
+Many of the dependencies come from bioconda which has not yet made
+binaries available for Apple's new M1 and M2 ARM-based chips. MacOS is capable
+of running intel binaries on the new chips, but you have to tell conda to use
+them. There are two ways to do this:
+
+Option 1: Install the intel miniconda and use that to install all the dependencies.
+
+Option 2: Install the Apple M1 miniconda, but allow it to use intel binaries if the
+ARM binaries are missing:
+
+```
+conda config --add subdirs osx-64
+```
+
+Note, mixing binaries can sometimes cause problems, so revert this setting when
+you are done creating the envornment for this project:
+
+```
+conda config --remove subdirs osx-64
+```
+
+#### Medaka
+
+Medaka can be finicky, especialy on MacOS. See the workaround below.
+
+#### Modules and iGraph
+
+In Snakefile.modules, the bipartite_modules rule can fail:
+
+    Error in rule bipartite_modules:
+
+This may be due to a problem with the igraph binary. You can force snakemake to
+compile a new version of igraph with --use-conda:
+
+    snakemake -j 8 -s papers/Snakefile.modules --use-conda
+
+### General Snakemake errors: Check the log file first
 
 In general, if there is an error, snakemake will report something like this:
 
@@ -142,10 +181,30 @@ In general, if there is an error, snakemake will report something like this:
 Most rules are configured to capture all output to rule-specific log files. The first thing to do is to look at the log file. In the case above:
 
     $ cat test/run/tree_VOG00035/VOG00035.aln.log
-    
+
     	Error: Sequence file test/run/tree_VOG00035/VOG00035.faa is empty or misformatted
 
-In this case, there were no genes found with VOG00035. 
+In this case, there were no genes found with VOG00035.
+
+### Medaka errors
+
+If you get an error in the medaka rule, and the log looks something like this:
+
+    Illegal instruction: 4  medaka tools list_models
+
+Then there is a mismatch between the binary and your CPU. There are two things
+to try here.
+
+First, use conda and pip to recompile the binary locally. Snakemake can do this
+for you with the --use-conda flag:
+
+    snakemake -j 8 -s paper/Snakefile.veimes --use-conda
+
+If that doesn't work, you can simply skip the medaka step. The racon polishing
+is usually good enough on its own. To skip medaka set the use_medaka variable
+to False:
+
+   snakemake -j 8 -s paper/Snakefile.veimes --config use_medaka=False
 
 ### Snakefile.iqtree: empty faa file
 If you encounter the error above, where the faa file for tree bulding is empty, check that the VOG is in your annotation table:
