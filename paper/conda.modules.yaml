@@ -1,0 +1,7 @@
+channels:
+  - conda-forge
+dependencies:
+  - pip:
+    - pandas
+    - leidenalg
+    - python-igraph

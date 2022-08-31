@@ -1,0 +1,22 @@
+channels:
+    - conda-forge
+    - bioconda
+    - jmeppley
+dependencies:
+    - mamba
+    - snakemake-minimal
+    - pandas
+    - biopython==1.76
+    - prodigal
+    - minimap2
+    - samtools
+    - bwa
+    - last
+    - mcl
+    - racon
+    - cd-hit
+    - hmmer
+    - iqtree
+    - py-metagenomics
+    - batch_launcher
+    - jupy_tools

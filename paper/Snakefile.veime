@@ -31,6 +31,17 @@ fragments_dir = config.get('fragments_dir', f'{working_dir}/fragments')
 # final output fasta
 output_file = config.get('output_fasta', f'{working_dir}/polished_fragments.fasta')
 
+# use medaka
+# medaka offers a slight improvement, but can be finicky. Skip it here.
+use_medaka = config.get('use_medaka', True)
+
+# if they user uses something non standard, treat it as False if it starts with an "f"
+if isinstance(use_medaka, str):
+    if use_medaka[0].lower == 'f':
+      use_medaka = False
+    else:
+      use_medaka = True
+
 # translating fragments to reads (if reading fragents from file)
 # default fragmment namee is {readname}:{fragment_num}
 fragment_pattern = config.get('fragment_pattern', r':\d+$')
@@ -43,6 +54,11 @@ RACON_ITERS = config.get('racon_iters', 3)
 MIN_Q = config.get('min_q', 9)
 MM_THREADS = config.get("mm_threads", 5)
 POLISH_THREADS = config.get("polish_threads", 5)
+if use_medaka:
+    FINAL_NAME = 'medaka'
+else:
+    FINAL_NAME = f"draft.{RACON_ITERS}"
+
 
 rule all:
     input: output_file
@@ -110,8 +126,8 @@ else:
 rule collect_polished_fragments:
     " collect each final VEIME from read/cluster subfolders into one final FASTA file "
     input: 
-        fasta=lambda w: expand(f'{fragments_dir}/{{read}}/medaka.fasta', read=get_read_names()),
-        paf=lambda w: expand(f'{fragments_dir}/{{read}}/medaka.v.drafts.gene.lengths', read=get_read_names()),
+        fasta=lambda w: expand(f'{fragments_dir}/{{read}}/{FINAL_NAME}.fasta', read=get_read_names()),
+        paf=lambda w: expand(f'{fragments_dir}/{{read}}/{FINAL_NAME}.v.drafts.gene.lengths', read=get_read_names()),
     output: output_file
     run:
         with open(str(output), 'wt') as fasta_out:
@@ -122,17 +138,17 @@ rule collect_polished_fragments:
 rule compare_drafts:
     """ map polished seq agaisnt all the drafts """
     input: 
-        final='{prefix}/medaka.fasta',
+        final='{prefix}/{FINAL_NAME}.fasta',
         drafts='{prefix}/drafts.fasta'
-    output: '{prefix}/medaka.v.drafts.paf'
-    benchmark: '{prefix}/medaka.v.drafts.paf.time'
+    output: '{prefix}/{FINAL_NAME}.v.drafts.paf'
+    benchmark: '{prefix}/{FINAL_NAME}.v.drafts.paf.time'
     shell: 'minimap2 -x map-ont {input.drafts} {input.final} \
             > {output} \
             2> {output}.log'
 
 rule collect_drafts:
     """ put all the drafts into a fasta file to compare with the final sequence """
-    input: lambda w: [f"{w.prefix}/draft.{n}.fasta" for n in range(RACON_ITERS + 1)]
+    input: lambda w: [f"{w.prefix}/draft.{n}.fasta" for n in range(RACON_ITERS + (1 if use_medaka else 0))]
     output: '{prefix}/drafts.fasta'
     benchmark: '{prefix}/drafts.fasta.time'
     run:
@@ -198,6 +214,7 @@ rule medaka:
         out_dir='{prefix}/{read}',
         model=config.get('MEDAKA_model', 'r941_min_high_g303')                                                          
     threads: POLISH_THREADS
+    conda: "conda.medaka.yaml"
     shell:                                                                                       
         """rm -f {params.out_dir}/consensus.fasta
            medaka_consensus -i {input.reads} -d {input.draft} \
@@ -210,7 +227,7 @@ ruleorder: pick_ref_from_paf > racon_iter
 def comparison_inputs(wildcards, as_dict=False):
     " return a list or dict of faa files from polishing drafts "
     from snakemake.io import Namedlist
-    input_dict = {'medaka': f'{wildcards.prefix}/medaka.faa'}
+    input_dict = {'medaka': f'{wildcards.prefix}/medaka.faa'} if use_medaka else {}
     for i in range(RACON_ITERS + 1):
         input_dict[f'draft_{i}'] = f'{wildcards.prefix}/draft.{i}.faa'
     return input_dict if as_dict else input_dict.values()
@@ -218,8 +235,8 @@ def comparison_inputs(wildcards, as_dict=False):
 rule compare_genes:
     """ tabulate the number, mean length, and total AAs of predicted genes for each draft """
     input: comparison_inputs
-    output: '{prefix}/medaka.v.drafts.gene.lengths'
-    benchmark: '{prefix}/medaka.v.drafts.gene.lengths.time'
+    output: '{prefix}/{FINAL_NAME}.v.drafts.gene.lengths'
+    benchmark: '{prefix}/{FINAL_NAME}.v.drafts.gene.lengths.time'
     run:
         data = []
         names = []
