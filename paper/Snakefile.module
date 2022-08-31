@@ -29,7 +29,7 @@ PREFIX = f"{WORKING_DIR}/{NAME}"
 # supply a location to use eggnog annots
 EGGNOG_DATA_DIR = config.get('eggnog_data_dir', None)
 if EGGNOG_DATA_DIR is not None:
-        EGGNOG_DATA_DIR = os.path.abspath(EGGNOG_DATA_DIR)
+    EGGNOG_DATA_DIR = os.path.abspath(EGGNOG_DATA_DIR)
 
 #EGGNOG_DATA_DIR="/nvram/jmeppley/eggnog_mapper"
 # set these to fast scratch disks for better performance (They can be the same

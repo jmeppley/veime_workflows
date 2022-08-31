@@ -17,13 +17,15 @@ steps (clustering and tree building).
 
 ## Installation
 
+Note: This workflow wil not work on windows or macos. The required dependencies are only available for linux at the moment.
+
 First, clone this repository locally.
 
 Second, install the necessary software with conda:
 
     conda env create -p ./conda.env -f ./conda.yaml
 
-Note: replace "conda" with "mamba" for faster installation.
+Note: replace "conda" with "mamba" (if you have mamba installed) for faster installation.
 
 At this point, you can test the installation with the reduced set of data in ./test/data
 without downlading any database.
@@ -70,10 +72,10 @@ databases:
 To get the latest VOG definitions, create a local folder to store them in,
 [download](https://vogdb.org/download) and upack the archive, and concatenate all the hmm files into one DB:
 
-   mkdir -p /local/path/to/VOGS
-   wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
-   tar -zxvf vog.hmm.tar.gz
-   cat VOG[0-9]*.hmm > VOGS.hmm
+    mkdir -p /local/path/to/VOGS
+    wget -c http://fileshare.csb.univie.ac.at/vog/latest/vog.hmm.tar.gz
+    tar -zxvf vog.hmm.tar.gz
+    cat VOG[0-9]*.hmm > VOGS.hmm
 
 You will also want to download the [VOG
 descriptions](http://fileshare.csb.univie.ac.at/vog/latest/vog.annotations.tsv.gz) file. This contains the
@@ -122,7 +124,11 @@ database locations, the most useful ones are:
 
 ## Troubleshooting
 
-### Check the log file first
+### MacOS is not supported
+
+Sorry. As of now, some key dependencies are unavailable for MacOS. 
+
+### Snakemake errors: Check the log file first
 
 In general, if there is an error, snakemake will report something like this:
 
