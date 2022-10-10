@@ -1,0 +1,158 @@
+""" 
+Workflow to self-polish one cluster of fragments. Called by Snakefile.veime.
+
+This workflow can fail any number of places:
+ * there are too few fragmens
+ * the fragments have no self-hits: skip this cluster
+ * racon doesn't fined enough overlaps
+ 
+It will only perform the gene length comparison if we get a final draft
+
+"""
+import pandas, numpy
+from Bio import SeqIO
+
+FINAL_NAME = config['FINAL_NAME']
+RACON_ITERS = config['RACON_ITERS']
+POLISH_THREADS = config['POLISH_THREADS']
+MIN_Q = config['MIN_Q']
+MM_THREADS = config['MM_THREADS']
+USE_MEDAKA = config['USE_MEDAKA']
+
+rule compare_drafts:
+    """ map polished seq agaisnt all the drafts """
+    input: 
+        final='{FINAL_NAME}.fasta',
+        drafts='drafts.fasta'
+    output: '{FINAL_NAME}.v.drafts.paf'
+    benchmark: '{FINAL_NAME}.v.drafts.paf.time'
+    shell: 'minimap2 -x map-ont {input.drafts} {input.final} \
+            > {output} \
+            2> {output}.log'
+
+rule collect_drafts:
+    """ put all the drafts into a fasta file to compare with the final sequence """
+    input: [f"draft.{n}.fasta" for n in range(RACON_ITERS + (1 if USE_MEDAKA else 0))]
+    output: 'drafts.fasta'
+    benchmark: 'drafts.fasta.time'
+    run:
+        with open(str(output), 'wt') as fasta_out:
+            for draft in input:
+                for frag in SeqIO.parse(str(draft), 'fasta'):
+                    frag.id = os.path.basename(draft)
+                    fasta_out.write(frag.format('fasta'))
+
+rule minimap_4_reference:
+    """ all v all to pick a ref frag """
+    input: 'all.fasta'
+    output: 'all.v.all.paf'
+    benchmark: 'all.v.all.paf.time'
+    threads: MM_THREADS
+    shell: 'minimap2 -t {threads} -x ava-ont {input} {input} > {output}'
+
+rule pick_ref_from_paf:
+    """ picks a ref frag and splits fasta into 2 (ref and others) """
+    input:
+        fasta='all.fasta',
+        paf='all.v.all.paf'
+    output:
+        ref='draft.0.fasta',
+        others='others.fasta'
+    benchmark: 'draft.0.fasta.time'
+    script: 'pick_ref_from_paf.py'        
+
+rule minimap_4_racon:
+    input:
+        draft=lambda w: f'draft.{int(w.racon_i) - 1}.fasta',
+        frags='others.fasta'
+    output: "draft.{racon_i}.sam"
+    benchmark: "draft.{racon_i}.sam.time"
+    threads: MM_THREADS
+    shell: 'minimap2 -t {threads} -ax map-ont {input.draft} {input.frags} > {output}'
+        
+rule racon_iter:
+    input:
+        draft=lambda w: f'draft.{int(w.racon_i) - 1}.fasta',
+        frags='others.fasta',
+        sam="draft.{racon_i}.sam"
+    output: 'draft.{racon_i}.fasta'
+    benchmark: 'draft.{racon_i}.fasta.time'
+    threads: POLISH_THREADS
+    shell: 'racon --include-unpolished \
+                --quality-threshold={MIN_Q} \
+                -t {threads} \
+                {input.frags} {input.sam} {input.draft} \
+                > {output} \
+                2> {output}.log'
+
+rule medaka:
+    input:
+        frags='others.fasta',
+        draft=f'draft.{RACON_ITERS}.fasta'
+    output:
+        fasta='medaka.fasta',
+        hdf='medaka/consensus_probs.hdf'
+    benchmark: 'medaka.fasta.time'
+    params:
+        out_dir='medaka',
+        model=config.get('MEDAKA_model', 'r941_min_high_g303')
+    threads: POLISH_THREADS
+    conda: "conda.medaka.yaml"
+    shell:
+        """rm -f {params.out_dir}/consensus.fasta
+           medaka_consensus -i {input.frags} -d {input.draft} \
+            -o {params.out_dir} -t {threads} -m {params.model} \
+            > {params.out_dir}.log 2>&1
+           mv {params.out_dir}/consensus.fasta {output.fasta}"""
+
+ruleorder: pick_ref_from_paf > racon_iter
+
+def comparison_inputs(wildcards, as_dict=False):
+    " return a list or dict of faa files from polishing drafts "
+    from snakemake.io import Namedlist
+    input_dict = {'medaka': 'medaka.faa'} if USE_MEDAKA else {}
+    for i in range(RACON_ITERS + 1):
+        input_dict[f'draft_{i}'] = f'draft.{i}.faa'
+    return input_dict if as_dict else input_dict.values()
+
+rule compare_genes:
+    """ tabulate the number, mean length, and total AAs of predicted genes for each draft """
+    input: comparison_inputs
+    output: '{FINAL_NAME}.v.drafts.gene.lengths'
+    benchmark: '{FINAL_NAME}.v.drafts.gene.lengths.time'
+    run:
+        data = []
+        names = []
+        for name, faa_file in comparison_inputs(wildcards, as_dict=True).items():
+            lengths = []
+            for gene in SeqIO.parse(faa_file, 'fasta'):
+                _, start, end, _ = gene.description.split("#", 3)
+                lengths.append(int(end) - int(start))
+            if len(lengths) > 0:
+                lengths = numpy.array(lengths)
+                data.append(dict(mean=numpy.round(lengths.mean(),1),
+                                 max=lengths.max(),
+                                 min=lengths.min(),
+                                 median=numpy.median(lengths),
+                                 num=len(lengths),
+                                 total=lengths.sum()
+                                ))
+            else:
+                data.append({k:0 for k in
+                ['mean','max','min','median','num','total']})
+            names.append(name)
+        stats = pandas.DataFrame(data, index=names)
+        stats.sort_index().to_csv(str(output), sep='\t')
+        
+rule prodigal:
+    " predict genes on each version of the VEIME "
+    input: '{name}.fasta',
+    output:
+        faa='{name}.faa',
+        gff='{name}.gff',
+    wildcard_constraints:
+        name='(?!polished)[^/]+'
+    benchmark: '{name}.gff.time'
+    shell: 'prodigal -a {output.faa} -f gff -o {output.gff} -p meta -i {input} \
+            > {output.gff}.log 2>&1'
+ 

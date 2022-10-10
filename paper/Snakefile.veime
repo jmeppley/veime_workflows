@@ -10,12 +10,23 @@ Polish PR fragments in each read or cluster by:
  * polish rep with others using racon (3 passes)
  * polish with others using medaka
  
-This wokflow also has code to predict genes on all the drafts and compare gene lengths at each step, 
-but that is not part of the default output
+Additionally, predict genes on all the drafts and compare gene lengths at each step.
+
+NOTES:
+
+If you ran Sankefile.frags and use the same workging directory, this workflow wil find the clustered 
+fragments and use those. 
+
+To ignore the clustering (and to just use fragments from the same read for 
+polishing) set fragments_dir to an empty (or missing) directory and set fragments_fasta to 
+{working_dir}/fragments.fasta. The fragments are expected to be named with the read name and 
+fragment number joined by a colon (":"). The workflow recovers the read name from the fragment name
+by removing whaterver matches the regular expression: r':\d+$'. You can change the expression 
+with the "fragment_pattern" configuration value.
+
 """
 
 from Bio import SeqIO
-import pandas, numpy
 
 
 #####
@@ -33,14 +44,14 @@ output_file = config.get('output_fasta', f'{working_dir}/polished_fragments.fast
 
 # use medaka
 # medaka offers a slight improvement, but can be finicky. Skip it here.
-use_medaka = config.get('use_medaka', True)
+USE_MEDAKA = config.get('use_medaka', True)
 
 # if they user uses something non standard, treat it as False if it starts with an "f"
-if isinstance(use_medaka, str):
-    if use_medaka[0].lower == 'f':
-      use_medaka = False
+if isinstance(USE_MEDAKA, str):
+    if USE_MEDAKA[0].lower == 'f':
+      USE_MEDAKA = False
     else:
-      use_medaka = True
+      USE_MEDAKA = True
 
 # translating fragments to reads (if reading fragents from file)
 # default fragmment namee is {readname}:{fragment_num}
@@ -54,14 +65,18 @@ RACON_ITERS = config.get('racon_iters', 3)
 MIN_Q = config.get('min_q', 9)
 MM_THREADS = config.get("mm_threads", 5)
 POLISH_THREADS = config.get("polish_threads", 5)
-if use_medaka:
+if USE_MEDAKA:
     FINAL_NAME = 'medaka'
 else:
     FINAL_NAME = f"draft.{RACON_ITERS}"
 
-
 rule all:
-    input: output_file
+    input:
+        all_polished=output_file,
+
+## optional starting points:
+# If workgin from just the fragments, make a directory for each read with it's fragments in a fasta file
+# If using the clustered fragments from Snakefile.frags, just use the existing fragments/ directory (no checkpoint)
 
 if fragment_fasta:
     # only use checkpoint if we have to (working from. asingle fasta)
@@ -85,7 +100,7 @@ if fragment_fasta:
                 with open(read_fasta, 'at') as fasta_out:
                     fasta_out.write(fragment.format('fasta'))
 
-    def get_read_names():
+    def get_cluster_names():
         """ get the list of read names from the checkpoint output """
         output_dir = str(checkpoints.split_fragments_by_read.get().output)
 
@@ -105,29 +120,91 @@ if fragment_fasta:
         return reads
 else:
     # fragments dir already exists
-    def get_read_names():
+    def get_cluster_names():
         """ get the list of read or cluster names from the checkpoint output """
         # simple glob will be faster for lots of files
         import glob
 
         # if we're given files, assume they are all good
-        read_glob = f"{fragments_dir}/*/all.fasta"
+        cluster_glob = f"{fragments_dir}/*/all.fasta"
 
-        # pull out the parent dir as read name for each file with more than one fragment
-        reads = [os.path.basename(os.path.dirname(hmf_file))
-                 for hmf_file 
-                 in glob.glob(read_glob)
-                 if sum(1 for r in SeqIO.parse(hmf_file, 'fasta')) > 1
-                ]
+        # pull out the parent dir as cluster name for each file with more than one fragment
+        clusters = [os.path.basename(os.path.dirname(hmf_file))
+                    for hmf_file 
+                    in glob.glob(cluster_glob)
+                    if sum(1 for r in SeqIO.parse(hmf_file, 'fasta')) > 1
+                   ]
 
-        return reads
+        return clusters
+        
+rule launch_self_polishing:
+    """ This rule calls snakemake for a single cluster 
+        
+        Many clusters fail top polish, we'll assume they are false positive concatemers and 
+        skip them later (checkpoint 2). For now, ignore the snakemake exit code and process
+        all clusters. The checkpoint will clean them up.
+    """
+    input: '{prefix}/{cluster}/all.fasta'
+    output:
+        fasta=f'{{prefix}}/{{cluster}}/{FINAL_NAME}.fasta',
+        lengths=f'{{prefix}}/{{cluster}}/{FINAL_NAME}.v.drafts.gene.lengths'
+    log: '{prefix}/{cluster}/snake.self.polish.log'
+    threads: POLISH_THREADS
+    params:
+        cluster_dir='{prefix}/{cluster}',
+        snake_dir=os.path.abspath(workflow.basedir),
+        output=f"{FINAL_NAME}.fasta {FINAL_NAME}.v.drafts.gene.lengths",
+        conda=f"--use-conda --conda-frontend {workflow.conda_frontend}" \
+              if workflow.use_conda else ""
+    shell:
+        """
+        cd {params.cluster_dir}
+        snakemake -s {params.snake_dir}/Snakefile.self_polish \
+            {params.conda} \
+            --config POLISH_THREADS={POLISH_THREADS} \
+                     RACON_ITERS={RACON_ITERS} \
+                     MM_THREADS={MM_THREADS} \
+                     USE_MEDAKA={USE_MEDAKA} \
+                     MIN_Q={MIN_Q} \
+                     FINAL_NAME={FINAL_NAME} \
+            -j {threads} -p -k \
+            {params.output} \
+          > snake.self.polish.log 2>&1 \
+          || touch {params.output}
+        """
+    
+## Checkpoint 2:
+# drop any reads/clusters where the fragments didn't polish successfully
 
+checkpoint drop_bad_clusters:
+    input: lambda w: expand(f'{fragments_dir}/{{cluster}}/{FINAL_NAME}.fasta', \
+                            cluster=get_cluster_names()),
+    output: f'{working_dir}/good_fragment_clusters.list'
+    run:
+        with open(str(output), 'wt') as cluster_list:
+            for input_file in input:
+                if os.path.getsize(str(input_file)) > 0:
+                    cluster = os.path.basename(os.path.dirname(str(input_file)))
+                    cluster_list.write(f"{cluster}\n")
+            # TODO: do some sanity checking:
+            #  * make sure a paf file was generated
+            #  * make sure the error is not just medaka (is there a racon output?)
+            #  * report how many clusters got to each stage
+                    
+
+def get_good_cluster_names():
+    """ get the list of cluster names with at least some self hits """
+    cluster_list = str(checkpoints.drop_bad_clusters.get().output)
+    
+    with open(cluster_list) as lines:
+        clusters = [l.strip() for l in lines]
+
+    return clusters
 
 rule collect_polished_fragments:
-    " collect each final VEIME from read/cluster subfolders into one final FASTA file "
-    input: 
-        fasta=lambda w: expand(f'{fragments_dir}/{{read}}/{FINAL_NAME}.fasta', read=get_read_names()),
-        paf=lambda w: expand(f'{fragments_dir}/{{read}}/{FINAL_NAME}.v.drafts.gene.lengths', read=get_read_names()),
+    """ collect each final VEIME from read/cluster subfolders into one final FASTA file """
+    input: lambda w: expand(f'{fragments_dir}/{{cluster}}/{FINAL_NAME}.fasta', \
+                            cluster=get_good_cluster_names()),
     output: output_file
     run:
         with open(str(output), 'wt') as fasta_out:
@@ -135,140 +212,5 @@ rule collect_polished_fragments:
                 for fragment in SeqIO.parse(str(input_file), 'fasta'):
                     fasta_out.write(fragment.format('fasta'))
 
-rule compare_drafts:
-    """ map polished seq agaisnt all the drafts """
-    input: 
-        final='{prefix}/{FINAL_NAME}.fasta',
-        drafts='{prefix}/drafts.fasta'
-    output: '{prefix}/{FINAL_NAME}.v.drafts.paf'
-    benchmark: '{prefix}/{FINAL_NAME}.v.drafts.paf.time'
-    shell: 'minimap2 -x map-ont {input.drafts} {input.final} \
-            > {output} \
-            2> {output}.log'
 
-rule collect_drafts:
-    """ put all the drafts into a fasta file to compare with the final sequence """
-    input: lambda w: [f"{w.prefix}/draft.{n}.fasta" for n in range(RACON_ITERS + (1 if use_medaka else 0))]
-    output: '{prefix}/drafts.fasta'
-    benchmark: '{prefix}/drafts.fasta.time'
-    run:
-        with open(str(output), 'wt') as fasta_out:
-            for draft in input:
-                for read in SeqIO.parse(str(draft), 'fasta'):
-                    read.id = os.path.basename(draft)
-                    fasta_out.write(read.format('fasta'))
-
-rule minimap_4_reference:
-    """ all v all to pick a ref read """
-    input: '{prefix}/{read}/all.fasta'
-    output: '{prefix}/{read}/all.v.all.paf'
-    benchmark: '{prefix}/{read}/all.v.all.paf.time'
-    threads: MM_THREADS
-    shell: 'minimap2 -t {threads} -x ava-ont {input} {input} > {output}'
-
-rule pick_ref_from_paf:
-    """ picks a ref read and splits fasta into 2 (ref and others) """
-    input:
-        fasta='{prefix}/{read}/all.fasta',
-        paf='{prefix}/{read}/all.v.all.paf'
-    output:
-        ref='{prefix}/{read}/draft.0.fasta',
-        others='{prefix}/{read}/others.fasta'
-    benchmark: '{prefix}/{read}/draft.0.fasta.time'
-    script: 'pick_ref_from_paf.py'        
-
-rule minimap_4_racon:
-    input:
-        draft=lambda w: f'{w.prefix}/{w.read}/draft.{int(w.racon_i) - 1}.fasta',
-        reads='{prefix}/{read}/others.fasta'
-    output: "{prefix}/{read}/draft.{racon_i}.sam"
-    benchmark: "{prefix}/{read}/draft.{racon_i}.sam.time"
-    threads: MM_THREADS
-    shell: 'minimap2 -t {threads} -ax map-ont {input.draft} {input.reads} > {output}'
-        
-rule racon_iter:
-    input:
-        draft=lambda w: f'{w.prefix}/{w.read}/draft.{int(w.racon_i) - 1}.fasta',
-        reads='{prefix}/{read}/others.fasta',
-        sam="{prefix}/{read}/draft.{racon_i}.sam"
-    output: '{prefix}/{read}/draft.{racon_i}.fasta'
-    benchmark: '{prefix}/{read}/draft.{racon_i}.fasta.time'
-    threads: POLISH_THREADS
-    shell: 'racon --include-unpolished \
-                --quality-threshold={MIN_Q} \
-                -t {threads} \
-                {input.reads} {input.sam} {input.draft} \
-                > {output} \
-                2> {output}.log'
-
-rule medaka:
-    input:
-        reads='{prefix}/{read}/others.fasta',
-        draft=lambda w: '{prefix}/{read}/draft.{racon_iters}.fasta' \
-                            .format(racon_iters=RACON_ITERS, **w)
-    output:
-        fasta='{prefix}/{read}/medaka.fasta',
-        hdf='{prefix}/{read}/consensus_probs.hdf'
-    benchmark: '{prefix}/{read}/medaka.fasta.time'
-    params:
-        out_dir='{prefix}/{read}',
-        model=config.get('MEDAKA_model', 'r941_min_high_g303')
-    threads: POLISH_THREADS
-    conda: "conda.medaka.yaml"
-    shell:
-        """rm -f {params.out_dir}/consensus.fasta
-           medaka_consensus -i {input.reads} -d {input.draft} \
-            -o {params.out_dir} -t {threads} -m {params.model} \
-            > {params.out_dir}.log 2>&1
-           mv {params.out_dir}/consensus.fasta {output.fasta}"""
-
-ruleorder: pick_ref_from_paf > racon_iter
-
-def comparison_inputs(wildcards, as_dict=False):
-    " return a list or dict of faa files from polishing drafts "
-    from snakemake.io import Namedlist
-    input_dict = {'medaka': f'{wildcards.prefix}/medaka.faa'} if use_medaka else {}
-    for i in range(RACON_ITERS + 1):
-        input_dict[f'draft_{i}'] = f'{wildcards.prefix}/draft.{i}.faa'
-    return input_dict if as_dict else input_dict.values()
-
-rule compare_genes:
-    """ tabulate the number, mean length, and total AAs of predicted genes for each draft """
-    input: comparison_inputs
-    output: '{prefix}/{FINAL_NAME}.v.drafts.gene.lengths'
-    benchmark: '{prefix}/{FINAL_NAME}.v.drafts.gene.lengths.time'
-    run:
-        data = []
-        names = []
-        for name, faa_file in comparison_inputs(wildcards, as_dict=True).items():
-            lengths = []
-            for gene in SeqIO.parse(faa_file, 'fasta'):
-                _, start, end, _ = gene.description.split("#", 3)
-                lengths.append(int(end) - int(start))
-            if len(lengths) > 0:
-                lengths = numpy.array(lengths)
-                data.append(dict(mean=numpy.round(lengths.mean(),1),
-                                 max=lengths.max(),
-                                 min=lengths.min(),
-                                 median=numpy.median(lengths),
-                                 num=len(lengths),
-                                 total=lengths.sum()
-                                ))
-            else:
-                data.append({k:0 for k in
-                ['mean','max','min','median','num','total']})
-            names.append(name)
-        stats = pandas.DataFrame(data, index=names)
-        stats.sort_index().to_csv(str(output), sep='\t')
-        
-rule prodigal:
-    " predict genes on each version of the VEIME "
-    input: '{prefix}/{name}.fasta',
-    output:
-        faa='{prefix}/{name}.faa',
-        gff='{prefix}/{name}.gff',
-    wildcard_constraints:
-        name='(?!polished)[^/]+'
-    benchmark: '{prefix}/{name}.gff.time'
-    shell: 'prodigal -a {output.faa} -f gff -o {output.gff} -p meta -i {input} \
-            > {output.gff}.log 2>&1'
+    
