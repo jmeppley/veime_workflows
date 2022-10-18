@@ -15,6 +15,10 @@ is:
 You will also need to download the VOG HMM db and eggnog DB for the last two
 steps (clustering and tree building).
 
+For more information or to cite, use:
+
+[Eppley, JM et al. Marine viral particles reveal an expansive repertoire of phage-parasitizing mobile elements. PNAS. 10/18/2022](https://doi.org/10.1073/pnas.2212722119)
+
 ## Installation
 
 Note: This workflow wil not work on windows or macos. The required dependencies are only available for linux at the moment.
